@@ -1,0 +1,19 @@
+# Local TimescaleDB to hold a copy of the VPS centineldb for testing status-engine.
+# Listens on host port 5433 (avoids clashing with a local Postgres on 5432).
+# Image is pinned to the VPS's TimescaleDB version (2.21.0) on pg15 — the restore
+# requires source and target TimescaleDB versions to match (post_restore aborts on
+# "catalog version mismatch"). If your VPS reports a different version, change the
+# tag to timescale/timescaledb:<that-version>-pg15.
+services:
+  ts_local:
+    image: timescale/timescaledb:2.21.0-pg15
+    container_name: ts_local
+    environment:
+      POSTGRES_PASSWORD: local
+    ports:
+      - "5433:5432"
+    volumes:
+      - ts_local_data:/var/lib/postgresql/data
+
+volumes:
+  ts_local_data:
