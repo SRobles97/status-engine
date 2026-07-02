@@ -1,0 +1,44 @@
+from datetime import datetime, timezone, timedelta
+import pandas as pd
+from engine import intervals
+
+
+def _t(minute):
+    return datetime(2026, 6, 20, 12, minute, tzinfo=timezone.utc)
+
+
+def test_remap_idle_to_load():
+    s = pd.Series(["OFF", "IDLE", "LOAD", "IDLE"])
+    out = intervals.remap_idle_to_load(s)
+    assert list(out) == ["OFF", "LOAD", "LOAD", "LOAD"]
+
+
+def test_collapse_simple_alternation():
+    times = [_t(0), _t(1), _t(2), _t(3)]
+    labels = ["LOAD", "LOAD", "OFF", "OFF"]
+    runs = intervals.collapse_runs(times, labels, gap_seconds=300)
+    assert len(runs) == 2
+    assert runs[0].state == "LOAD" and runs[0].start == _t(0) and runs[0].end == _t(2)
+    # trailing OFF run is closed at the last sample
+    assert runs[1].state == "OFF" and runs[1].start == _t(2) and runs[1].end == _t(3)
+
+
+def test_collapse_trailing_load_left_open():
+    times = [_t(0), _t(1), _t(2)]
+    labels = ["OFF", "LOAD", "LOAD"]
+    runs = intervals.collapse_runs(times, labels, gap_seconds=300)
+    assert runs[-1].state == "LOAD" and runs[-1].end is None
+
+
+def test_collapse_gap_breaks_run():
+    # 10-minute gap between sample 1 and 2 exceeds gap_seconds=300 (5 min)
+    times = [_t(0), _t(1), _t(12), _t(13)]
+    labels = ["LOAD", "LOAD", "LOAD", "LOAD"]
+    runs = intervals.collapse_runs(times, labels, gap_seconds=300)
+    assert len(runs) == 2
+    assert runs[0].state == "LOAD" and runs[0].start == _t(0) and runs[0].end == _t(1)
+    assert runs[1].state == "LOAD" and runs[1].start == _t(12) and runs[1].end is None
+
+
+def test_collapse_empty():
+    assert intervals.collapse_runs([], [], gap_seconds=300) == []
