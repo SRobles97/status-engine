@@ -139,3 +139,60 @@ def slice_off_to_schedule(start, end, tz_name, schedules, special):
         if hi > lo:
             pieces.append((lo, hi))
     return pieces
+
+
+@dataclass
+class IntervalRow:
+    device_id: int
+    source: str
+    state: str
+    start_time: datetime
+    end_time: Optional[datetime]
+    measurement_count: int
+    is_allowed: bool
+    on_schedule_seconds: int
+    on_schedule_ratio: float
+    on_schedule: bool
+    on_schedule_rule: str
+
+
+def _count_samples(times, start, end) -> int:
+    if end is None:
+        return sum(1 for t in times if t >= start)
+    return sum(1 for t in times if start <= t < end)
+
+
+def build_intervals(device_id, times, statuses, tz_name, schedules, special,
+                    allowed_minutes, gap_seconds, source, rule):
+    runs = collapse_runs(list(times), list(statuses), gap_seconds)
+    runs = split_runs_at_midnight(runs, tz_name)
+    rows: List[IntervalRow] = []
+    for r in runs:
+        if r.state == "LOAD":
+            on_s, ratio, ok = (0, 0.0, False)
+            if r.end is not None:
+                on_s, ratio, ok = compute_on_schedule(
+                    r.start, r.end, tz_name, schedules, special, rule)
+            rows.append(IntervalRow(
+                device_id=device_id, source=source, state="LOAD",
+                start_time=r.start, end_time=r.end,
+                measurement_count=_count_samples(times, r.start, r.end),
+                is_allowed=False, on_schedule_seconds=on_s,
+                on_schedule_ratio=ratio, on_schedule=ok, on_schedule_rule=rule))
+        else:  # OFF -> closed, sliced to schedule
+            if r.end is None:
+                continue  # defensive: collapse_runs never leaves OFF open
+            for piece_start, piece_end in slice_off_to_schedule(
+                    r.start, r.end, tz_name, schedules, special):
+                on_s, ratio, ok = compute_on_schedule(
+                    piece_start, piece_end, tz_name, schedules, special, rule)
+                dur_min = (piece_end - piece_start).total_seconds() / 60.0
+                is_allowed = (allowed_minutes is not None
+                              and dur_min <= allowed_minutes)
+                rows.append(IntervalRow(
+                    device_id=device_id, source=source, state="OFF",
+                    start_time=piece_start, end_time=piece_end,
+                    measurement_count=_count_samples(times, piece_start, piece_end),
+                    is_allowed=is_allowed, on_schedule_seconds=on_s,
+                    on_schedule_ratio=ratio, on_schedule=ok, on_schedule_rule=rule))
+    return rows

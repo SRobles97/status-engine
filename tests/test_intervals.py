@@ -109,3 +109,48 @@ def test_slice_off_to_schedule_clips_to_blocks():
 def test_slice_off_no_schedule_returns_empty():
     pieces = intervals.slice_off_to_schedule(_utc(9), _utc(10), "UTC", [], {})
     assert pieces == []
+
+
+def test_build_intervals_load_and_off_with_schedule():
+    # samples every 30 min from 07:00 to 12:00 Monday, LOAD until 09:00 then OFF
+    times, labels = [], []
+    h = 7
+    while h <= 12:
+        times.append(_utc(h))
+        labels.append("LOAD" if h < 9 else "OFF")
+        h += 1  # hourly samples
+    rows = intervals.build_intervals(
+        device_id=99, times=times, statuses=labels, tz_name="UTC",
+        schedules=_SCHED, special={}, allowed_minutes=15, gap_seconds=7200,
+        source="algo", rule="majority")
+    loads = [r for r in rows if r.state == "LOAD"]
+    offs = [r for r in rows if r.state == "OFF"]
+    assert loads and offs
+    # LOAD interval carries device+source
+    assert loads[0].device_id == 99 and loads[0].source == "algo"
+    # OFF is clipped to <=16:00 and starts no earlier than 08:00 (all inside here)
+    assert all(o.on_schedule for o in offs)
+    # OFF over 15 min allowed threshold -> not allowed
+    assert all(o.is_allowed is False for o in offs)
+
+
+def test_build_intervals_no_schedule_load_only():
+    times = [_utc(9), _utc(10), _utc(11)]
+    labels = ["OFF", "OFF", "OFF"]
+    rows = intervals.build_intervals(
+        device_id=1, times=times, statuses=labels, tz_name="UTC",
+        schedules=[], special={}, allowed_minutes=15, gap_seconds=7200,
+        source="algo", rule="majority")
+    assert rows == []  # no schedule -> no OFF intervals, and no LOAD present
+
+
+def test_build_intervals_short_off_is_allowed():
+    # 10-minute OFF inside schedule, allowed_minutes=15 -> is_allowed True
+    times = [_utc(9, 0), _utc(9, 10), _utc(9, 15)]
+    labels = ["OFF", "OFF", "LOAD"]
+    rows = intervals.build_intervals(
+        device_id=1, times=times, statuses=labels, tz_name="UTC",
+        schedules=_SCHED, special={}, allowed_minutes=15, gap_seconds=7200,
+        source="algo", rule="majority")
+    offs = [r for r in rows if r.state == "OFF"]
+    assert offs and offs[0].is_allowed is True
