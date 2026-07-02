@@ -42,3 +42,28 @@ def test_collapse_gap_breaks_run():
 
 def test_collapse_empty():
     assert intervals.collapse_runs([], [], gap_seconds=300) == []
+
+
+def test_split_no_crossing_is_noop():
+    r = intervals.Run("LOAD", _t(0), _t(30))
+    out = intervals.split_runs_at_midnight([r], "UTC")
+    assert out == [r]
+
+
+def test_split_closed_run_crossing_midnight_utc():
+    # 23:30 -> 00:30 next day, tz=UTC
+    start = datetime(2026, 6, 20, 23, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 21, 0, 30, tzinfo=timezone.utc)
+    out = intervals.split_runs_at_midnight([intervals.Run("OFF", start, end)], "UTC")
+    midnight = datetime(2026, 6, 21, 0, 0, tzinfo=timezone.utc)
+    assert len(out) == 2
+    assert out[0].start == start and out[0].end == midnight
+    assert out[1].start == midnight and out[1].end == end
+
+
+def test_split_open_run_keeps_final_segment_open():
+    start = datetime(2026, 6, 20, 23, 30, tzinfo=timezone.utc)
+    # open LOAD run that has crossed into the next day; "now" is implied by later samples
+    out = intervals.split_runs_at_midnight([intervals.Run("LOAD", start, None)], "UTC")
+    # cannot split an open run with no end -> returned unchanged (open, single day at tail)
+    assert out == [intervals.Run("LOAD", start, None)]
