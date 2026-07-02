@@ -31,6 +31,7 @@ class StatusAlgorithm(ABC):
     # guard is applied by the runner before smoothing, so glitches can't anchor smoothing.
     guard_column: Optional[str] = None
     guard_min: float = 0.0
+    source_device_key: Optional[str] = None
 
     def __post_init__(self):
         if self.power_column not in ALLOWED_POWER_COLUMNS:

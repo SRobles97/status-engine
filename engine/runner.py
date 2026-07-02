@@ -33,34 +33,38 @@ def window_bounds(now: datetime, tz_name: str, window_days: int) -> tuple[dateti
 def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
              window_days: int, default_tz: str, on_schedule_only: bool = False) -> RunResult:
     algo = discovered.algorithm
-    if discovered.device_id is None:
+    write_id = discovered.device_id
+    if write_id is None:
         return RunResult(None, algo.name, 0, 0, "skipped",
                          f"unresolved device {algo.company}/{algo.device_key}")
+    if algo.source_device_key and discovered.source_device_id is None:
+        return RunResult(write_id, algo.name, 0, 0, "skipped",
+                         f"unresolved source device {algo.source_device_key}")
+    read_id = discovered.source_device_id if algo.source_device_key else write_id
 
-    tz_name = repo.device_timezone(conn, discovered.device_id) or default_tz
+    tz_name = repo.device_timezone(conn, read_id) or default_tz
     start, end = window_bounds(now, tz_name, window_days)
     extra = ([algo.guard_column]
              if algo.guard_column and algo.guard_column != algo.power_column else None)
-    df = repo.fetch_window(conn, discovered.device_id, algo.power_column, start, end,
-                           extra_columns=extra)
+    df = repo.fetch_window(conn, read_id, algo.power_column, start, end, extra_columns=extra)
     if df.empty:
-        return RunResult(discovered.device_id, algo.name, 0, 0, "skipped", "empty window")
+        return RunResult(write_id, algo.name, 0, 0, "skipped", "empty window")
 
     # Restrict to the device's work hours, matching the production worker's coverage.
     # A device with no configured schedule is classified in full (no filtering).
     if on_schedule_only:
-        schedules, special = repo.fetch_device_schedules(conn, discovered.device_id)
+        schedules, special = repo.fetch_device_schedules(conn, read_id)
         if schedules:
             mask = on_schedule_mask(list(df["time"]), tz_name, schedules, special)
             df = df[mask]
             if df.empty:
-                return RunResult(discovered.device_id, algo.name, 0, 0,
+                return RunResult(write_id, algo.name, 0, 0,
                                  "skipped", "no on-schedule measurements")
 
     try:
         statuses = algo.classify(df)
     except DegenerateWindowError as e:
-        return RunResult(discovered.device_id, algo.name, len(df), 0, "skipped", str(e))
+        return RunResult(write_id, algo.name, len(df), 0, "skipped", str(e))
 
     statuses = smooth_statuses(statuses, df["time"], algo.smoothing_minutes)
 
@@ -71,11 +75,9 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
         statuses = statuses.mask(df[algo.guard_column].astype(float) < algo.guard_min, "OFF")
 
     times = list(df["time"])
-    updated = repo.upsert_measurement_status(
-        conn, discovered.device_id, times, list(statuses), algo.name)
-    repo.upsert_device_algo_status(
-        conn, discovered.device_id, statuses.iloc[-1], algo.name, times[-1], len(df))
-    return RunResult(discovered.device_id, algo.name, len(df), updated, "ok")
+    updated = repo.upsert_measurement_status(conn, write_id, times, list(statuses), algo.name)
+    repo.upsert_device_algo_status(conn, write_id, statuses.iloc[-1], algo.name, times[-1], len(df))
+    return RunResult(write_id, algo.name, len(df), updated, "ok")
 
 
 def run_all(repo, conn, discovered_list, now: datetime, window_days: int,

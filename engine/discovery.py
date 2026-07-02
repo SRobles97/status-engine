@@ -13,6 +13,7 @@ from engine.algorithms import StatusAlgorithm
 class DiscoveredAlgorithm:
     algorithm: StatusAlgorithm
     device_id: Optional[int]
+    source_device_id: Optional[int] = None
 
 
 def _load_module(path: Path):
@@ -37,10 +38,12 @@ def load_algorithm_specs(root: Path) -> list[StatusAlgorithm]:
     return specs
 
 
-def discover(
-    root: Path, resolver: Callable[[str, str], Optional[int]]
-) -> list[DiscoveredAlgorithm]:
-    return [
-        DiscoveredAlgorithm(algorithm=a, device_id=resolver(a.company, a.device_key))
-        for a in load_algorithm_specs(root)
-    ]
+def discover(root: Path, resolver: Callable[[str, str], Optional[int]]) -> list[DiscoveredAlgorithm]:
+    out: list[DiscoveredAlgorithm] = []
+    for a in load_algorithm_specs(root):
+        device_id = resolver(a.company, a.device_key)
+        source_device_id = (resolver(a.company, a.source_device_key)
+                            if a.source_device_key else None)
+        out.append(DiscoveredAlgorithm(algorithm=a, device_id=device_id,
+                                       source_device_id=source_device_id))
+    return out
