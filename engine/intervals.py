@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from engine.schedule import build_daily_blocks, resolve_schedules_for_date
+
 
 def remap_idle_to_load(statuses: pd.Series) -> pd.Series:
     """IDLE collapses to LOAD; device_state_intervals only knows LOAD/OFF."""
@@ -87,3 +89,53 @@ def split_runs_at_midnight(runs: List[Run], tz_name: str) -> List[Run]:
             prev = c
         out.append(Run(r.state, prev, r.end))
     return out
+
+
+def schedule_blocks_utc(start, end, tz_name, schedules, special):
+    """Union of work blocks (UTC tz-aware) overlapping [start, end)."""
+    tz = ZoneInfo(tz_name)
+    start_local_day = start.astimezone(tz).date()
+    end_local_day = end.astimezone(tz).date()
+    blocks = []
+    d = start_local_day
+    while d <= end_local_day:
+        for day_schedules in resolve_schedules_for_date(schedules, d):
+            for bs, be in build_daily_blocks(day_schedules, d, special):
+                blocks.append((bs.replace(tzinfo=tz).astimezone(start.tzinfo),
+                               be.replace(tzinfo=tz).astimezone(start.tzinfo)))
+        d = d + timedelta(days=1)
+    return blocks
+
+
+def _overlap_seconds(a_start, a_end, b_start, b_end) -> float:
+    lo = max(a_start, b_start)
+    hi = min(a_end, b_end)
+    return max(0.0, (hi - lo).total_seconds())
+
+
+def compute_on_schedule(start, end, tz_name, schedules, special, rule):
+    """Return (on_seconds:int, ratio:float, on_schedule:bool) for [start, end)."""
+    total = (end - start).total_seconds()
+    blocks = schedule_blocks_utc(start, end, tz_name, schedules, special)
+    on = sum(_overlap_seconds(start, end, bs, be) for bs, be in blocks)
+    on_i = int(round(on))
+    ratio = (on / total) if total > 0 else 0.0
+    if rule == "strict":
+        ok = total > 0 and on_i >= int(round(total))
+    elif rule == "any":
+        ok = on_i > 0
+    else:  # majority
+        ok = on_i * 2 >= int(round(total)) and on_i > 0
+    return on_i, ratio, ok
+
+
+def slice_off_to_schedule(start, end, tz_name, schedules, special):
+    """Clip an OFF interval to the parts inside work blocks. Empty if no schedule."""
+    blocks = schedule_blocks_utc(start, end, tz_name, schedules, special)
+    pieces = []
+    for bs, be in sorted(blocks):
+        lo = max(start, bs)
+        hi = min(end, be)
+        if hi > lo:
+            pieces.append((lo, hi))
+    return pieces

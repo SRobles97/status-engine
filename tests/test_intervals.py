@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import pandas as pd
 from engine import intervals
 
@@ -67,3 +67,45 @@ def test_split_open_run_keeps_final_segment_open():
     out = intervals.split_runs_at_midnight([intervals.Run("LOAD", start, None)], "UTC")
     # cannot split an open run with no end -> returned unchanged (open, single day at tail)
     assert out == [intervals.Run("LOAD", start, None)]
+
+
+# One schedule version: Mon-Sun 08:00-16:00, no breaks.
+_SCHED = [(date(2026, 1, 1), None, "day",
+           {k: {"workHours": {"start": "08:00", "end": "16:00"}}
+            for k in ["monday", "tuesday", "wednesday", "thursday",
+                      "friday", "saturday", "sunday"]})]
+
+
+def _utc(h, m=0):
+    return datetime(2026, 6, 22, h, m, tzinfo=timezone.utc)  # 2026-06-22 is a Monday
+
+
+def test_compute_on_schedule_fully_inside():
+    on, ratio, ok = intervals.compute_on_schedule(
+        _utc(9), _utc(10), "UTC", _SCHED, {}, "majority")
+    assert on == 3600 and ratio == 1.0 and ok is True
+
+
+def test_compute_on_schedule_partial_majority():
+    # 07:30-08:30 -> 30 min inside (08:00-08:30)
+    on, ratio, ok = intervals.compute_on_schedule(
+        _utc(7, 30), _utc(8, 30), "UTC", _SCHED, {}, "majority")
+    assert on == 1800 and ok is True  # exactly half -> majority true (2*1800 >= 3600)
+
+
+def test_compute_on_schedule_outside():
+    on, ratio, ok = intervals.compute_on_schedule(
+        _utc(18), _utc(19), "UTC", _SCHED, {}, "majority")
+    assert on == 0 and ratio == 0.0 and ok is False
+
+
+def test_slice_off_to_schedule_clips_to_blocks():
+    # OFF 07:00-12:00 -> clipped to 08:00-12:00
+    pieces = intervals.slice_off_to_schedule(
+        _utc(7), _utc(12), "UTC", _SCHED, {})
+    assert pieces == [(_utc(8), _utc(12))]
+
+
+def test_slice_off_no_schedule_returns_empty():
+    pieces = intervals.slice_off_to_schedule(_utc(9), _utc(10), "UTC", [], {})
+    assert pieces == []
