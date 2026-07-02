@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, date
 import pandas as pd
 from engine import intervals
 
@@ -134,7 +134,7 @@ def test_build_intervals_load_and_off_with_schedule():
     assert all(o.is_allowed is False for o in offs)
 
 
-def test_build_intervals_no_schedule_load_only():
+def test_build_intervals_no_schedule_no_off():
     times = [_utc(9), _utc(10), _utc(11)]
     labels = ["OFF", "OFF", "OFF"]
     rows = intervals.build_intervals(
@@ -154,3 +154,56 @@ def test_build_intervals_short_off_is_allowed():
         source="algo", rule="majority")
     offs = [r for r in rows if r.state == "OFF"]
     assert offs and offs[0].is_allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Merge-blocks tests: two shift-types with overlapping workHours (08:00-16:00
+# and 10:00-18:00) on the same Monday → raw blocks overlap 10:00-16:00.
+# schedule_blocks_utc must return the merged non-overlapping union [08:00,18:00).
+# ---------------------------------------------------------------------------
+
+_SCHED_OVERLAP = [
+    (date(2026, 1, 1), None, "day",
+     {k: {"workHours": {"start": "08:00", "end": "16:00"}}
+      for k in ["monday", "tuesday", "wednesday", "thursday",
+                "friday", "saturday", "sunday"]}),
+    (date(2026, 1, 1), None, "night",
+     {k: {"workHours": {"start": "10:00", "end": "18:00"}}
+      for k in ["monday", "tuesday", "wednesday", "thursday",
+                "friday", "saturday", "sunday"]}),
+]
+
+
+def test_schedule_blocks_utc_merged():
+    """Test C: returned blocks are sorted and non-overlapping."""
+    blocks = intervals.schedule_blocks_utc(
+        _utc(7), _utc(19), "UTC", _SCHED_OVERLAP, {})
+    # At minimum one block (merged union); each consecutive pair must not overlap
+    assert len(blocks) >= 1
+    for i in range(len(blocks) - 1):
+        assert blocks[i][1] <= blocks[i + 1][0], (
+            f"blocks overlap: {blocks[i]} and {blocks[i+1]}")
+
+
+def test_compute_on_schedule_no_double_count():
+    """Test A: LOAD fully inside union must give ratio==1.0, not >1.0."""
+    # interval 11:00-12:00 is inside both raw blocks (10:00-16:00 and 08:00-16:00)
+    # without merging, on_seconds would be 7200 for a 3600s interval → ratio 2.0
+    on, ratio, ok = intervals.compute_on_schedule(
+        _utc(11), _utc(12), "UTC", _SCHED_OVERLAP, {}, "majority")
+    duration = (_utc(12) - _utc(11)).total_seconds()
+    assert on <= duration, f"on_schedule_seconds {on} exceeds duration {duration}"
+    assert ratio <= 1.0, f"ratio {ratio} > 1.0 (double-counting)"
+    assert ratio == 1.0 and ok is True
+
+
+def test_slice_off_to_schedule_non_overlapping_pieces():
+    """Test B: OFF pieces from overlapping raw blocks must not overlap each other."""
+    # OFF spanning the whole merged window [08:00, 18:00); without merge, two
+    # overlapping pieces would be returned for the 10:00-16:00 intersection.
+    pieces = intervals.slice_off_to_schedule(
+        _utc(7), _utc(19), "UTC", _SCHED_OVERLAP, {})
+    assert pieces, "expected at least one piece"
+    for i in range(len(pieces) - 1):
+        assert pieces[i][1] <= pieces[i + 1][0], (
+            f"pieces overlap: {pieces[i]} and {pieces[i+1]}")

@@ -72,7 +72,13 @@ def _local_midnights_between(start: datetime, end: datetime, tz) -> List[datetim
 
 def split_runs_at_midnight(runs: List[Run], tz_name: str) -> List[Run]:
     """Split each closed run at local-midnight boundaries so every run belongs
-    to a single local day. Open runs (end=None) are returned unchanged."""
+    to a single local day. Open runs (end=None) are returned unchanged.
+
+    Known go-forward limitation: an open (trailing) LOAD run is passed through
+    unchanged, so with STATUS_WINDOW_DAYS=0 a prior day's trailing-open LOAD is
+    not revisited after midnight rollover. Deployments wanting the prior day's open
+    interval closed should set STATUS_WINDOW_DAYS=1.
+    """
     tz = ZoneInfo(tz_name)
     out: List[Run] = []
     for r in runs:
@@ -91,8 +97,36 @@ def split_runs_at_midnight(runs: List[Run], tz_name: str) -> List[Run]:
     return out
 
 
+def _merge_blocks(blocks):
+    """Return a sorted, non-overlapping union of (start, end) blocks.
+
+    Blocks whose ranges overlap or touch (next.start <= current.end) are merged
+    into a single block whose end is the maximum of the two ends.
+    """
+    if not blocks:
+        return []
+    sorted_blocks = sorted(blocks, key=lambda b: b[0])
+    merged = [sorted_blocks[0]]
+    for bs, be in sorted_blocks[1:]:
+        cur_start, cur_end = merged[-1]
+        if bs <= cur_end:  # overlap or adjacent: extend
+            merged[-1] = (cur_start, max(cur_end, be))
+        else:
+            merged.append((bs, be))
+    return merged
+
+
 def schedule_blocks_utc(start, end, tz_name, schedules, special):
-    """Union of work blocks (UTC tz-aware) overlapping [start, end)."""
+    """Merged non-overlapping union of work blocks (UTC tz-aware) overlapping [start, end).
+
+    Iterates every local day in [start, end), collects all raw blocks from every
+    active shift_type via resolve_schedules_for_date / build_daily_blocks, then
+    merges overlapping or adjacent blocks so the result is a sorted, non-overlapping
+    list. This prevents double-counting in compute_on_schedule and overlapping OFF
+    pieces in slice_off_to_schedule when multiple shift-types share hours (e.g. an
+    overnight tail plus the next day's early shift, or two shift-types with
+    overlapping workHours).
+    """
     tz = ZoneInfo(tz_name)
     start_local_day = start.astimezone(tz).date()
     end_local_day = end.astimezone(tz).date()
@@ -104,7 +138,7 @@ def schedule_blocks_utc(start, end, tz_name, schedules, special):
                 blocks.append((bs.replace(tzinfo=tz).astimezone(start.tzinfo),
                                be.replace(tzinfo=tz).astimezone(start.tzinfo)))
         d = d + timedelta(days=1)
-    return blocks
+    return _merge_blocks(blocks)
 
 
 def _overlap_seconds(a_start, a_end, b_start, b_end) -> float:

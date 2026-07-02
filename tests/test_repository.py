@@ -170,3 +170,16 @@ def test_get_or_create_unassigned_returns_existing():
     assert repository.get_or_create_unassigned_classification(conn, 3) == 7
     sql, params = cur.execute.call_args_list[0].args
     assert "classifications" in sql and params == (3, "Sin asignar")
+
+
+def test_get_or_create_unassigned_creates_when_missing():
+    conn, cur = _conn_with_cursor()
+    # First fetchone (SELECT) misses; second (INSERT RETURNING) returns new id
+    cur.fetchone.side_effect = [None, (11,)]
+    result = repository.get_or_create_unassigned_classification(conn, 5)
+    assert result == 11
+    # Two execute calls: SELECT then INSERT
+    assert cur.execute.call_count == 2
+    insert_sql, insert_params = cur.execute.call_args_list[1].args
+    assert "INSERT INTO classifications" in insert_sql
+    assert insert_params[0] == 5 and insert_params[1] == "Sin asignar"
