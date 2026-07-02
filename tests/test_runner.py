@@ -257,3 +257,26 @@ def test_run_once_no_intervals_when_disabled():
                           on_schedule_only=False, emit_intervals=False)
     assert res.result == "ok"
     assert not repo.insert_intervals.called
+
+
+def test_run_once_degenerate_window_in_interval_mode_is_skipped():
+    # A KMeans algo with a flat power column (< 3 distinct values) raises
+    # DegenerateWindowError during the interval-path _classify call.
+    # run_once must return result="skipped" and must NOT call insert_intervals.
+    df = pd.DataFrame({
+        "time": pd.date_range("2026-06-22T12:00", periods=4, freq="h", tz="UTC"),
+        "total_active_power": [3.0, 3.0, 3.0, 3.0],  # single distinct value -> degenerate
+    })
+    repo = MagicMock()
+    repo.device_timezone.return_value = "UTC"
+    repo.fetch_window.return_value = df
+    repo.fetch_device_schedules.return_value = ([], {})
+    disc = DiscoveredAlgorithm(
+        algorithm=KMeansAlgorithm(company="C", device_key="D",
+            power_column="total_active_power", n_clusters=3),
+        device_id=7)
+    res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                          emit_intervals=True)
+    assert res.result == "skipped"
+    assert "distinct" in (res.error_detail or "")
+    repo.insert_intervals.assert_not_called()

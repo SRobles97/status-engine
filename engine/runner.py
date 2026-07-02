@@ -100,10 +100,13 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
         schedules, special = repo.fetch_device_schedules(conn, read_id)
 
     if emit_intervals:
-        statuses_full = _classify(algo, df)
-        _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
-                             schedules, special, gap_seconds, interval_source,
-                             on_schedule_rule)
+        try:
+            statuses_full = _classify(algo, df)
+            _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
+                                 schedules, special, gap_seconds, interval_source,
+                                 on_schedule_rule)
+        except DegenerateWindowError as e:
+            return RunResult(write_id, algo.name, len(df), 0, "skipped", str(e))
 
     # Restrict to the device's work hours, matching the production worker's coverage.
     # A device with no configured schedule is classified in full (no filtering).
