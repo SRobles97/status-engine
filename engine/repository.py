@@ -125,3 +125,70 @@ def try_advisory_lock(conn, key: int) -> bool:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))
         row = cur.fetchone()
     return bool(row[0])
+
+
+def fetch_threshold_minutes(conn, device_id: int) -> Optional[float]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT duration_minutes FROM device_threshold_config WHERE device_id = %s",
+            (device_id,),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def device_company_id(conn, device_id: int) -> Optional[int]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT company_id FROM devices WHERE id = %s", (device_id,))
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def get_or_create_unassigned_classification(conn, company_id: int) -> int:
+    name = "Sin asignar"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM classifications WHERE company_id = %s AND name = %s",
+            (company_id, name),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row[0])
+        cur.execute(
+            "INSERT INTO classifications (company_id, name, description, status, "
+            "color, is_work, is_system) VALUES (%s, %s, '', 'active', '#9E9E9E', "
+            "false, true) RETURNING id",
+            (company_id, name),
+        )
+        return int(cur.fetchone()[0])
+
+
+def delete_algo_intervals_for_day(conn, device_id: int, local_day, tz_name: str,
+                                  source: str = "algo") -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM device_state_intervals "
+            "WHERE device_id = %s AND source = %s "
+            "AND (start_time AT TIME ZONE %s)::date = %s",
+            (device_id, source, tz_name, local_day),
+        )
+
+
+def insert_intervals(conn, rows) -> int:
+    if not rows:
+        return 0
+    values = [
+        (r.device_id, r.source, r.state, r.start_time, r.end_time,
+         r.measurement_count, r.is_allowed, r.on_schedule_seconds,
+         r.on_schedule_ratio, r.on_schedule, r.on_schedule_rule)
+        for r in rows
+    ]
+    sql = (
+        "INSERT INTO device_state_intervals "
+        "(device_id, source, state, start_time, end_time, measurement_count, "
+        "is_allowed, on_schedule_seconds, on_schedule_ratio, on_schedule, "
+        "on_schedule_rule) VALUES %s"
+    )
+    with conn.cursor() as cur:
+        execute_values(cur, sql, values)
+    return len(values)
