@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -209,3 +209,83 @@ def test_guard_overrides_smoothing():
     runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC", on_schedule_only=False)
     _, _, _, statuses, _ = repo.upsert_measurement_status.call_args.args
     assert statuses == ["LOAD", "OFF", "LOAD"]  # guard beats smoothing on the dip
+
+
+def _algo():
+    return ThresholdAlgorithm(company="C", device_key="D",
+                              power_column="phase_a_active_power", threshold_w=1100,
+                              smoothing_minutes=0)
+
+
+def test_run_once_emits_intervals_when_enabled():
+    # full window: OFF then LOAD, UTC, no schedule -> LOAD-only intervals
+    df = pd.DataFrame({
+        "time": pd.date_range("2026-06-22T12:00", periods=3, freq="h", tz="UTC"),
+        "phase_a_active_power": [0.0, 5000.0, 6000.0]})
+    repo = MagicMock()
+    repo.device_timezone.return_value = "UTC"
+    repo.fetch_window.return_value = df
+    repo.fetch_device_schedules.return_value = ([], {})   # no schedule
+    repo.fetch_threshold_minutes.return_value = 15.0
+    repo.device_company_id.return_value = 3
+    repo.get_or_create_unassigned_classification.return_value = 7
+    repo.upsert_measurement_status.return_value = 3
+    disc = DiscoveredAlgorithm(algorithm=_algo(), device_id=42)
+    # Patch the REAL reporting module the runner imports, so a misrouted call
+    # (e.g. repo.refresh_daily_facts) is caught instead of silently absorbed by
+    # the MagicMock repo. See runner._emit_algo_intervals.
+    with patch.object(runner.reporting_mod, "refresh_daily_facts") as m_facts, \
+         patch.object(runner.reporting_mod, "refresh_classification_facts") as m_class:
+        res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                              on_schedule_only=False, emit_intervals=True,
+                              gap_seconds=7200, interval_source="algo",
+                              on_schedule_rule="majority")
+    assert res.result == "ok"
+    # delete-then-insert happened for the touched day
+    assert repo.delete_algo_intervals_for_day.called
+    assert repo.insert_intervals.called
+    inserted = repo.insert_intervals.call_args.args[1]
+    assert all(r.source == "algo" for r in inserted)
+    # facts refresh goes through engine.reporting, not the repo module
+    assert m_facts.called
+    assert m_class.called
+    # repo must NOT carry the reporting functions (guards against re-misrouting)
+    assert not isinstance(getattr(type(repo), "refresh_daily_facts", None), property)
+
+
+def test_run_once_no_intervals_when_disabled():
+    df = pd.DataFrame({
+        "time": pd.date_range("2026-06-22T12:00", periods=2, freq="h", tz="UTC"),
+        "phase_a_active_power": [0.0, 5000.0]})
+    repo = MagicMock()
+    repo.device_timezone.return_value = "UTC"
+    repo.fetch_window.return_value = df
+    repo.upsert_measurement_status.return_value = 2
+    disc = DiscoveredAlgorithm(algorithm=_algo(), device_id=42)
+    res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                          on_schedule_only=False, emit_intervals=False)
+    assert res.result == "ok"
+    assert not repo.insert_intervals.called
+
+
+def test_run_once_degenerate_window_in_interval_mode_is_skipped():
+    # A KMeans algo with a flat power column (< 3 distinct values) raises
+    # DegenerateWindowError during the interval-path _classify call.
+    # run_once must return result="skipped" and must NOT call insert_intervals.
+    df = pd.DataFrame({
+        "time": pd.date_range("2026-06-22T12:00", periods=4, freq="h", tz="UTC"),
+        "total_active_power": [3.0, 3.0, 3.0, 3.0],  # single distinct value -> degenerate
+    })
+    repo = MagicMock()
+    repo.device_timezone.return_value = "UTC"
+    repo.fetch_window.return_value = df
+    repo.fetch_device_schedules.return_value = ([], {})
+    disc = DiscoveredAlgorithm(
+        algorithm=KMeansAlgorithm(company="C", device_key="D",
+            power_column="total_active_power", n_clusters=3),
+        device_id=7)
+    res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                          emit_intervals=True)
+    assert res.result == "skipped"
+    assert "distinct" in (res.error_detail or "")
+    repo.insert_intervals.assert_not_called()

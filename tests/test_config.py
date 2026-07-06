@@ -36,3 +36,20 @@ def test_on_schedule_only_default_true_and_env_override():
     assert Settings.from_env({"DB_DSN": "x", "STATUS_ON_SCHEDULE_ONLY": "false"}).on_schedule_only is False
     assert Settings.from_env({"DB_DSN": "x", "STATUS_ON_SCHEDULE_ONLY": "0"}).on_schedule_only is False
     assert Settings.from_env({"DB_DSN": "x", "STATUS_ON_SCHEDULE_ONLY": "true"}).on_schedule_only is True
+
+
+def test_interval_settings_defaults_and_env():
+    s = Settings.from_env({"DB_DSN": "x"})
+    assert s.emit_intervals is True
+    assert s.gap_seconds == 300.0
+    assert s.interval_source == "algo"
+    assert s.on_schedule_rule == "majority"
+
+    s2 = Settings.from_env({
+        "DB_DSN": "x", "EMIT_INTERVALS": "false",
+        "GAP_SECONDS": "120", "INTERVAL_SOURCE": "algo",
+        "ON_SCHEDULE_RULE": "strict",
+    })
+    assert s2.emit_intervals is False
+    assert s2.gap_seconds == 120.0
+    assert s2.on_schedule_rule == "strict"

@@ -23,7 +23,11 @@ def run_iteration(settings: Settings, *, repo=default_repo, now: datetime | None
         )
         results = run_all(repo, conn, discovered,
                           now, settings.status_window_days, settings.default_tz,
-                          on_schedule_only=settings.on_schedule_only)
+                          on_schedule_only=settings.on_schedule_only,
+                          emit_intervals=settings.emit_intervals,
+                          gap_seconds=settings.gap_seconds,
+                          interval_source=settings.interval_source,
+                          on_schedule_rule=settings.on_schedule_rule)
         conn.commit()
         return results
     finally:

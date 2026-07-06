@@ -120,3 +120,66 @@ def test_fetch_window_rejects_non_whitelisted_extra():
     with pytest.raises(ValueError):
         repository.fetch_window(conn, 42, "phase_a_active_power", None, None,
                                 extra_columns=["evil"])
+
+
+def test_fetch_threshold_minutes():
+    conn, cur = _conn_with_cursor()
+    cur.fetchone.return_value = (15.0,)
+    assert repository.fetch_threshold_minutes(conn, 52) == 15.0
+    sql, params = cur.execute.call_args.args
+    assert "device_threshold_config" in sql and params == (52,)
+
+
+def test_fetch_threshold_minutes_none():
+    conn, cur = _conn_with_cursor()
+    cur.fetchone.return_value = None
+    assert repository.fetch_threshold_minutes(conn, 52) is None
+
+
+def test_delete_algo_intervals_for_day_scopes_source_and_day():
+    from datetime import date
+    conn, cur = _conn_with_cursor()
+    repository.delete_algo_intervals_for_day(conn, 52, date(2026, 6, 22), "America/Santiago")
+    sql, params = cur.execute.call_args.args
+    assert "DELETE FROM device_state_intervals" in sql
+    assert "source = %s" in sql and "AT TIME ZONE" in sql
+    assert params == (52, "algo", "America/Santiago", date(2026, 6, 22))
+
+
+def test_insert_intervals_uses_execute_values_with_source():
+    from datetime import datetime, timezone
+    from engine.intervals import IntervalRow
+    conn, cur = _conn_with_cursor()
+    rows = [IntervalRow(device_id=52, source="algo", state="LOAD",
+                        start_time=datetime(2026, 6, 22, 12, tzinfo=timezone.utc),
+                        end_time=None, measurement_count=3, is_allowed=False,
+                        on_schedule_seconds=0, on_schedule_ratio=0.0,
+                        on_schedule=False, on_schedule_rule="majority")]
+    with patch("engine.repository.execute_values") as ev:
+        n = repository.insert_intervals(conn, rows)
+    assert n == 1
+    template_sql = ev.call_args.args[1]
+    assert "device_state_intervals" in template_sql and "source" in template_sql
+    values = ev.call_args.args[2]
+    assert values[0][0] == 52 and values[0][1] == "algo" and values[0][2] == "LOAD"
+
+
+def test_get_or_create_unassigned_returns_existing():
+    conn, cur = _conn_with_cursor()
+    cur.fetchone.return_value = (7,)
+    assert repository.get_or_create_unassigned_classification(conn, 3) == 7
+    sql, params = cur.execute.call_args_list[0].args
+    assert "classifications" in sql and params == (3, "Sin asignar")
+
+
+def test_get_or_create_unassigned_creates_when_missing():
+    conn, cur = _conn_with_cursor()
+    # First fetchone (SELECT) misses; second (INSERT RETURNING) returns new id
+    cur.fetchone.side_effect = [None, (11,)]
+    result = repository.get_or_create_unassigned_classification(conn, 5)
+    assert result == 11
+    # Two execute calls: SELECT then INSERT
+    assert cur.execute.call_count == 2
+    insert_sql, insert_params = cur.execute.call_args_list[1].args
+    assert "INSERT INTO classifications" in insert_sql
+    assert insert_params[0] == 5 and insert_params[1] == "Sin asignar"

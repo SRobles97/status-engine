@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
@@ -8,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from engine.algorithms import DegenerateWindowError
 from engine.discovery import DiscoveredAlgorithm
+from engine import intervals as intervals_mod
+from engine import reporting as reporting_mod
 from engine.schedule import on_schedule_mask
 from engine.smoothing import smooth_statuses
 
@@ -22,6 +25,47 @@ class RunResult:
     error_detail: Optional[str] = None
 
 
+def _classify(algo, df):
+    statuses = algo.classify(df)
+    statuses = smooth_statuses(statuses, df["time"], algo.smoothing_minutes)
+    if algo.guard_column:
+        statuses = statuses.mask(
+            df[algo.guard_column].astype(float) < algo.guard_min, "OFF")
+    return statuses
+
+
+def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
+                         schedules, special, gap_seconds, source, rule):
+    labels = intervals_mod.remap_idle_to_load(statuses_full)
+    times = list(df["time"])
+    allowed_minutes = repo.fetch_threshold_minutes(conn, write_id)
+    rows = intervals_mod.build_intervals(
+        device_id=write_id, times=times, statuses=list(labels),
+        tz_name=tz_name, schedules=schedules, special=special,
+        allowed_minutes=allowed_minutes, gap_seconds=gap_seconds,
+        source=source, rule=rule)
+
+    tz = ZoneInfo(tz_name)
+    by_day = OrderedDict()
+    for r in rows:
+        day = r.start_time.astimezone(tz).date()
+        by_day.setdefault(day, []).append(r)
+    # also refresh days the window covers even if they produced no rows
+    for t in times:
+        by_day.setdefault(t.astimezone(tz).date(), [])
+
+    company_id = repo.device_company_id(conn, write_id)
+    unassigned_id = (repo.get_or_create_unassigned_classification(conn, company_id)
+                     if company_id is not None else None)
+    for day, day_rows in by_day.items():
+        repo.delete_algo_intervals_for_day(conn, write_id, day, tz_name, source)
+        repo.insert_intervals(conn, day_rows)
+        reporting_mod.refresh_daily_facts(conn, write_id, day, tz_name, source, special)
+        if unassigned_id is not None:
+            reporting_mod.refresh_classification_facts(
+                conn, write_id, day, tz_name, unassigned_id, source, special)
+
+
 def window_bounds(now: datetime, tz_name: str, window_days: int) -> tuple[datetime, datetime]:
     tz = ZoneInfo(tz_name)
     local_now = now.astimezone(tz)
@@ -31,7 +75,9 @@ def window_bounds(now: datetime, tz_name: str, window_days: int) -> tuple[dateti
 
 
 def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
-             window_days: int, default_tz: str, on_schedule_only: bool = False) -> RunResult:
+             window_days: int, default_tz: str, on_schedule_only: bool = False,
+             emit_intervals: bool = False, gap_seconds: float = 300.0,
+             interval_source: str = "algo", on_schedule_rule: str = "majority") -> RunResult:
     algo = discovered.algorithm
     write_id = discovered.device_id
     if write_id is None:
@@ -50,10 +96,22 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
     if df.empty:
         return RunResult(write_id, algo.name, 0, 0, "skipped", "empty window")
 
+    schedules, special = ([], {})
+    if emit_intervals or on_schedule_only:
+        schedules, special = repo.fetch_device_schedules(conn, read_id)
+
+    if emit_intervals:
+        try:
+            statuses_full = _classify(algo, df)
+            _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
+                                 schedules, special, gap_seconds, interval_source,
+                                 on_schedule_rule)
+        except DegenerateWindowError as e:
+            return RunResult(write_id, algo.name, len(df), 0, "skipped", str(e))
+
     # Restrict to the device's work hours, matching the production worker's coverage.
     # A device with no configured schedule is classified in full (no filtering).
     if on_schedule_only:
-        schedules, special = repo.fetch_device_schedules(conn, read_id)
         if schedules:
             mask = on_schedule_mask(list(df["time"]), tz_name, schedules, special)
             df = df[mask]
@@ -62,17 +120,9 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
                                  "skipped", "no on-schedule measurements")
 
     try:
-        statuses = algo.classify(df)
+        statuses = _classify(algo, df)
     except DegenerateWindowError as e:
         return RunResult(write_id, algo.name, len(df), 0, "skipped", str(e))
-
-    statuses = smooth_statuses(statuses, df["time"], algo.smoothing_minutes)
-
-    # Data-quality guard as a hard floor AFTER smoothing: a row drawing essentially no
-    # current (guard_column < guard_min) cannot be LOAD/IDLE, even if smoothing bridged
-    # it. Rejects sensor glitches and stops smoothing from labelling true stoppages LOAD.
-    if algo.guard_column:
-        statuses = statuses.mask(df[algo.guard_column].astype(float) < algo.guard_min, "OFF")
 
     times = list(df["time"])
     updated = repo.upsert_measurement_status(conn, write_id, times, list(statuses), algo.name)
@@ -81,14 +131,18 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
 
 
 def run_all(repo, conn, discovered_list, now: datetime, window_days: int,
-            default_tz: str, on_schedule_only: bool = False) -> list[RunResult]:
+            default_tz: str, on_schedule_only: bool = False,
+            emit_intervals: bool = False, gap_seconds: float = 300.0,
+            interval_source: str = "algo", on_schedule_rule: str = "majority") -> list[RunResult]:
     results: list[RunResult] = []
     for discovered in discovered_list:
         algo = discovered.algorithm
         started = time.monotonic()
         try:
             res = run_once(repo, conn, discovered, now, window_days, default_tz,
-                           on_schedule_only=on_schedule_only)
+                           on_schedule_only=on_schedule_only,
+                           emit_intervals=emit_intervals, gap_seconds=gap_seconds,
+                           interval_source=interval_source, on_schedule_rule=on_schedule_rule)
         except Exception as e:  # FR-08: log and continue
             res = RunResult(discovered.device_id, algo.name, 0, 0, "error", str(e))
         duration_ms = int((time.monotonic() - started) * 1000)
