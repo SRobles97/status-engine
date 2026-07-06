@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -231,17 +231,26 @@ def test_run_once_emits_intervals_when_enabled():
     repo.get_or_create_unassigned_classification.return_value = 7
     repo.upsert_measurement_status.return_value = 3
     disc = DiscoveredAlgorithm(algorithm=_algo(), device_id=42)
-    res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
-                          on_schedule_only=False, emit_intervals=True,
-                          gap_seconds=7200, interval_source="algo",
-                          on_schedule_rule="majority")
+    # Patch the REAL reporting module the runner imports, so a misrouted call
+    # (e.g. repo.refresh_daily_facts) is caught instead of silently absorbed by
+    # the MagicMock repo. See runner._emit_algo_intervals.
+    with patch.object(runner.reporting_mod, "refresh_daily_facts") as m_facts, \
+         patch.object(runner.reporting_mod, "refresh_classification_facts") as m_class:
+        res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                              on_schedule_only=False, emit_intervals=True,
+                              gap_seconds=7200, interval_source="algo",
+                              on_schedule_rule="majority")
     assert res.result == "ok"
     # delete-then-insert happened for the touched day
     assert repo.delete_algo_intervals_for_day.called
     assert repo.insert_intervals.called
     inserted = repo.insert_intervals.call_args.args[1]
     assert all(r.source == "algo" for r in inserted)
-    assert repo.refresh_daily_facts.called
+    # facts refresh goes through engine.reporting, not the repo module
+    assert m_facts.called
+    assert m_class.called
+    # repo must NOT carry the reporting functions (guards against re-misrouting)
+    assert not isinstance(getattr(type(repo), "refresh_daily_facts", None), property)
 
 
 def test_run_once_no_intervals_when_disabled():

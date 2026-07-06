@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from engine.algorithms import DegenerateWindowError
 from engine.discovery import DiscoveredAlgorithm
 from engine import intervals as intervals_mod
+from engine import reporting as reporting_mod
 from engine.schedule import on_schedule_mask
 from engine.smoothing import smooth_statuses
 
@@ -59,9 +60,9 @@ def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
     for day, day_rows in by_day.items():
         repo.delete_algo_intervals_for_day(conn, write_id, day, tz_name, source)
         repo.insert_intervals(conn, day_rows)
-        repo.refresh_daily_facts(conn, write_id, day, tz_name, source, special)
+        reporting_mod.refresh_daily_facts(conn, write_id, day, tz_name, source, special)
         if unassigned_id is not None:
-            repo.refresh_classification_facts(
+            reporting_mod.refresh_classification_facts(
                 conn, write_id, day, tz_name, unassigned_id, source, special)
 
 
