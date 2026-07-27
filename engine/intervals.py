@@ -198,15 +198,30 @@ def _count_samples(times, start, end) -> int:
 
 def build_intervals(device_id, times, statuses, tz_name, schedules, special,
                     allowed_minutes, gap_seconds, source, rule):
-    runs = collapse_runs(list(times), list(statuses), gap_seconds)
+    times = list(times)
+    runs = collapse_runs(times, list(statuses), gap_seconds)
     runs = split_runs_at_midnight(runs, tz_name)
+    last_sample = times[-1] if times else None
     rows: List[IntervalRow] = []
     for r in runs:
         if r.state == "LOAD":
+            # An open (still running) LOAD run has no end yet, so score its
+            # schedule overlap against the last sample. Without this,
+            # on_schedule_seconds stays 0 for as long as the machine keeps
+            # running: refresh_daily_facts extrapolates the interval's DURATION
+            # but reads on_schedule_seconds as stored, so
+            # load_minutes_on_schedule — what the dashboard card and the reports
+            # show for an 'algoritmo' device — would sit at 0 and then jump when
+            # the run finally closes. The umbral worker gives its open intervals
+            # the same `end or now()` treatment.
+            #
+            # The cap is the last sample rather than wall clock: a device that
+            # stopped reporting must stop accruing worked time.
+            probe_end = r.end if r.end is not None else last_sample
             on_s, ratio, ok = (0, 0.0, False)
-            if r.end is not None:
+            if probe_end is not None and probe_end > r.start:
                 on_s, ratio, ok = compute_on_schedule(
-                    r.start, r.end, tz_name, schedules, special, rule)
+                    r.start, probe_end, tz_name, schedules, special, rule)
             rows.append(IntervalRow(
                 device_id=device_id, source=source, state="LOAD",
                 start_time=r.start, end_time=r.end,

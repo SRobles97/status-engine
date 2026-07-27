@@ -207,3 +207,73 @@ def test_slice_off_to_schedule_non_overlapping_pieces():
     for i in range(len(pieces) - 1):
         assert pieces[i][1] <= pieces[i + 1][0], (
             f"pieces overlap: {pieces[i]} and {pieces[i+1]}")
+
+
+# ---------------------------------------------------------------------------
+# Open (still running) LOAD interval: on-schedule seconds must accrue live.
+#
+# The trailing LOAD run is stored open (end_time NULL) and rewritten every tick.
+# `reporting.refresh_daily_facts` extrapolates its DURATION (now() - start_time)
+# but reads `on_schedule_seconds` as stored — so leaving it at 0 makes
+# `load_minutes_on_schedule` (what the dashboard card and the reports show for
+# an `algoritmo` device) stay at 0 for as long as the machine keeps running,
+# then jump once the run closes. The umbral worker avoids this by computing the
+# interval's schedule overlap against `end or now()`
+# (workers/jobs/job_schedule_kpi.py). The engine must match: use the last
+# sample as the open run's provisional end.
+# ---------------------------------------------------------------------------
+
+
+def _open_load_row(times):
+    rows = intervals.build_intervals(
+        device_id=7, times=times, statuses=["LOAD"] * len(times), tz_name="UTC",
+        schedules=_SCHED, special={}, allowed_minutes=15, gap_seconds=7200,
+        source="algo", rule="majority")
+    loads = [r for r in rows if r.state == "LOAD"]
+    assert len(loads) == 1
+    return loads[0]
+
+
+def test_open_load_accrues_on_schedule_seconds_up_to_last_sample():
+    # Running since 09:00, last sample 10:00, all inside the 08:00-16:00 shift.
+    row = _open_load_row([_utc(9), _utc(9, 30), _utc(10)])
+
+    assert row.end_time is None, "trailing LOAD must stay open"
+    assert row.on_schedule_seconds == 3600
+    assert row.on_schedule_ratio == 1.0
+    assert row.on_schedule is True
+
+
+def test_open_load_counts_only_the_in_shift_part():
+    # Running since 07:00 (before the shift), last sample 09:00 → 1 h inside.
+    row = _open_load_row([_utc(7), _utc(8), _utc(9)])
+
+    assert row.on_schedule_seconds == 3600
+    assert row.on_schedule_ratio == 0.5
+
+
+def test_open_load_outside_the_shift_stays_zero():
+    # Running since 18:00, after the 08:00-16:00 shift → nothing on schedule.
+    row = _open_load_row([_utc(18), _utc(19)])
+
+    assert row.on_schedule_seconds == 0
+    assert row.on_schedule_ratio == 0.0
+    assert row.on_schedule is False
+
+
+def test_open_load_with_a_single_sample_has_no_duration_yet():
+    row = _open_load_row([_utc(9)])
+
+    assert row.on_schedule_seconds == 0
+    assert row.on_schedule is False
+
+
+def test_open_load_is_not_extrapolated_past_the_last_sample():
+    """A device that stopped reporting must not keep accruing worked time.
+
+    Mirrors the umbral worker capping the open interval at `last_power_time`:
+    the schedule overlap stops at the last sample, not at wall-clock now.
+    """
+    row = _open_load_row([_utc(9), _utc(10)])
+
+    assert row.on_schedule_seconds == 3600  # 09:00→10:00, not 09:00→now
