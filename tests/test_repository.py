@@ -146,6 +146,26 @@ def test_delete_algo_intervals_for_day_scopes_source_and_day():
     assert params == (52, "algo", "America/Santiago", date(2026, 6, 22))
 
 
+def test_close_open_algo_intervals_before_trims_any_overlap():
+    """No sólo los abiertos: un cerrado que invade la ventana bloquea igual.
+
+    Incidente 2026-08-07: cerrar el abierto en la fecha equivocada dejó un
+    intervalo CERRADO cubriendo el día que el motor iba a reconstruir, y el
+    choque con ex_device_interval_overlap continuó idéntico.
+    """
+    from datetime import datetime, timezone
+    conn, cur = _conn_with_cursor()
+    cutoff = datetime(2026, 8, 6, 4, tzinfo=timezone.utc)
+    repository.close_open_algo_intervals_before(conn, 71, cutoff)
+    sql, params = cur.execute.call_args.args
+    assert "UPDATE device_state_intervals" in sql
+    assert "start_time < %s" in sql
+    assert "end_time IS NULL OR end_time > %s" in sql, (
+        "debe recortar también intervalos cerrados que cruzan el corte"
+    )
+    assert params == (cutoff, 71, "algo", cutoff, cutoff)
+
+
 def test_insert_intervals_uses_execute_values_with_source():
     from datetime import datetime, timezone
     from engine.intervals import IntervalRow

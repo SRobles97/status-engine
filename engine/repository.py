@@ -122,25 +122,32 @@ def insert_run_log(conn, *, company, device_key, device_id, algorithm,
 
 def close_open_algo_intervals_before(conn, device_id: int, cutoff,
                                      source: str = "algo") -> int:
-    """Cierra intervalos abiertos del motor que empezaron antes de `cutoff`.
+    """Recorta en `cutoff` todo intervalo del motor que invada la ventana.
 
     `build_intervals` deja ABIERTO el último intervalo de la ventana (= estado
     actual). Cuando la ventana avanza de día, ese abierto queda fuera del
     barrido por día de [delete_algo_intervals_for_day] — que filtra por
     `start_time` dentro del día — pero sigue cubriendo [inicio, ∞), así que
-    choca con cada fila que el motor intente insertar hoy
+    choca con cada fila que el motor intente insertar
     (`ex_device_interval_overlap`). El motor no puede recuperarse solo: re-deriva
     las mismas filas y vuelve a chocar en cada iteración.
 
-    Cerrarlo en `cutoff` conserva la historia y libera el rango que el motor va
-    a reconstruir. Devuelve cuántos cerró.
+    No basta con mirar `end_time IS NULL`: un intervalo CERRADO que empieza
+    antes de la ventana y termina dentro de ella bloquea igual (p. ej. tras
+    cerrar un abierto a mano en la fecha equivocada). La condición correcta es
+    "empieza antes del corte y se extiende más allá", que es exactamente el
+    solapamiento que la EXCLUDE constraint rechaza.
+
+    Recortar en `cutoff` conserva la historia previa y libera el rango que el
+    motor va a reconstruir. Devuelve cuántos recortó.
     """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE device_state_intervals SET end_time = %s "
-            "WHERE device_id = %s AND source = %s AND end_time IS NULL "
-            "AND start_time < %s",
-            (cutoff, device_id, source, cutoff),
+            "WHERE device_id = %s AND source = %s "
+            "AND start_time < %s "
+            "AND (end_time IS NULL OR end_time > %s)",
+            (cutoff, device_id, source, cutoff, cutoff),
         )
         return cur.rowcount
 
