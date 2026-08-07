@@ -120,6 +120,49 @@ def insert_run_log(conn, *, company, device_key, device_id, algorithm,
                           updated_count, result, error_detail, duration_ms))
 
 
+def close_open_algo_intervals_before(conn, device_id: int, cutoff,
+                                     source: str = "algo") -> int:
+    """Cierra intervalos abiertos del motor que empezaron antes de `cutoff`.
+
+    `build_intervals` deja ABIERTO el último intervalo de la ventana (= estado
+    actual). Cuando la ventana avanza de día, ese abierto queda fuera del
+    barrido por día de [delete_algo_intervals_for_day] — que filtra por
+    `start_time` dentro del día — pero sigue cubriendo [inicio, ∞), así que
+    choca con cada fila que el motor intente insertar hoy
+    (`ex_device_interval_overlap`). El motor no puede recuperarse solo: re-deriva
+    las mismas filas y vuelve a chocar en cada iteración.
+
+    Cerrarlo en `cutoff` conserva la historia y libera el rango que el motor va
+    a reconstruir. Devuelve cuántos cerró.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE device_state_intervals SET end_time = %s "
+            "WHERE device_id = %s AND source = %s AND end_time IS NULL "
+            "AND start_time < %s",
+            (cutoff, device_id, source, cutoff),
+        )
+        return cur.rowcount
+
+
+# Savepoints: aíslan el fallo de UN algoritmo. Sin ellos, una excepción de BD
+# envenena la transacción compartida y hasta el insert_run_log posterior falla,
+# de modo que el motivo real nunca se registra y los demás algoritmos mueren.
+def savepoint(conn, name: str = "algo_sp") -> None:
+    with conn.cursor() as cur:
+        cur.execute(f"SAVEPOINT {name}")
+
+
+def rollback_to_savepoint(conn, name: str = "algo_sp") -> None:
+    with conn.cursor() as cur:
+        cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+
+
+def release_savepoint(conn, name: str = "algo_sp") -> None:
+    with conn.cursor() as cur:
+        cur.execute(f"RELEASE SAVEPOINT {name}")
+
+
 def try_advisory_lock(conn, key: int) -> bool:
     with conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (key,))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -53,6 +53,14 @@ def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
     # also refresh days the window covers even if they produced no rows
     for t in times:
         by_day.setdefault(t.astimezone(tz).date(), [])
+
+    # Cierra el intervalo abierto que haya quedado de días anteriores. El
+    # barrido por día sólo alcanza filas cuyo start_time cae en ese día, así que
+    # un abierto de ayer sobrevive cubriendo [ayer, ∞) y choca con todo lo que
+    # se inserte hoy (ex_device_interval_overlap), dejando al motor en bucle.
+    if by_day:
+        cutoff = datetime.combine(min(by_day), dt_time(0, 0), tzinfo=tz)
+        repo.close_open_algo_intervals_before(conn, write_id, cutoff, source)
 
     company_id = repo.device_company_id(conn, write_id)
     unassigned_id = (repo.get_or_create_unassigned_classification(conn, company_id)
@@ -138,12 +146,20 @@ def run_all(repo, conn, discovered_list, now: datetime, window_days: int,
     for discovered in discovered_list:
         algo = discovered.algorithm
         started = time.monotonic()
+        # Un savepoint por algoritmo: sin él, un error de BD envenena la
+        # transacción compartida y el insert_run_log de más abajo también falla
+        # ("current transaction is aborted"), así que el motivo real nunca se
+        # registra y los algoritmos siguientes mueren con él. FR-08 pide
+        # "log and continue"; continuar exige revertir.
+        repo.savepoint(conn)
         try:
             res = run_once(repo, conn, discovered, now, window_days, default_tz,
                            on_schedule_only=on_schedule_only,
                            emit_intervals=emit_intervals, gap_seconds=gap_seconds,
                            interval_source=interval_source, on_schedule_rule=on_schedule_rule)
+            repo.release_savepoint(conn)
         except Exception as e:  # FR-08: log and continue
+            repo.rollback_to_savepoint(conn)
             res = RunResult(discovered.device_id, algo.name, 0, 0, "error", str(e))
         duration_ms = int((time.monotonic() - started) * 1000)
         repo.insert_run_log(
