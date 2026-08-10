@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from engine.algorithms import ThresholdAlgorithm
+from engine.algorithms import IdleThresholdAlgorithm, ThresholdAlgorithm
 from engine.discovery import DiscoveredAlgorithm
 from engine import runner
 
@@ -92,3 +92,46 @@ def test_failing_algorithm_does_not_poison_the_rest():
     # El fallo se revierte para que el log del run sí se pueda escribir.
     assert good_repo.rollback_to_savepoint.called
     assert good_repo.insert_run_log.call_count == 2
+
+
+def _repo_emitting_idle():
+    # Corriente estable en la banda IDLE (18.4 A): ni OFF (<5) ni LOAD (>19).
+    df = pd.DataFrame({
+        "time": pd.date_range("2026-08-07T11:00", periods=3, freq="h", tz="UTC"),
+        "total_current": [18.4, 18.4, 18.4]})
+    repo = MagicMock()
+    repo.device_timezone.return_value = "UTC"
+    repo.fetch_window.return_value = df
+    repo.fetch_device_schedules.return_value = ([], {})
+    repo.fetch_threshold_minutes.return_value = 15.0
+    repo.device_company_id.return_value = 14
+    repo.get_or_create_unassigned_classification.return_value = 7
+    repo.upsert_measurement_status.return_value = 3
+    return repo
+
+
+def test_stale_open_idle_interval_is_closed_before_insert():
+    """Un IDLE abierto de ayer bloquea igual que un LOAD abierto.
+
+    El cierre previo recorta por RANGO y no por estado, así que debe cubrir los
+    dos. Si alguna vez se filtra por state='LOAD', este test lo detecta.
+    """
+    repo = _repo_emitting_idle()
+    algo = IdleThresholdAlgorithm(
+        company="Envases Exportables", device_key="03-piloto",
+        power_column="total_current", emits_idle=True, smoothing_minutes=0)
+    disc = DiscoveredAlgorithm(algorithm=algo, device_id=66)
+    with patch.object(runner.reporting_mod, "refresh_daily_facts"), \
+         patch.object(runner.reporting_mod, "refresh_classification_facts"):
+        res = runner.run_once(repo, MagicMock(), disc, NOW, 0, "UTC",
+                              on_schedule_only=False, emit_intervals=True,
+                              gap_seconds=7200, interval_source="algo",
+                              on_schedule_rule="majority")
+
+    assert res.result == "ok"
+    assert repo.close_open_algo_intervals_before.called, (
+        "sin este cierre, el IDLE abierto de ayer bloquea todo insert de hoy")
+    assert repo.close_open_algo_intervals_before.call_args.args[1] == 66
+    inserted = repo.insert_intervals.call_args.args[1]
+    assert any(r.state == "IDLE" and r.end_time is None for r in inserted), (
+        "el tramo IDLE final debe quedar abierto")
