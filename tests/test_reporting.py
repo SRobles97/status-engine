@@ -62,3 +62,90 @@ def test_blank_facts_zero_the_idle_columns():
     sql, _ = cur.execute.call_args.args
     assert "idle_minutes=0" in sql.replace(" ", "")
     assert "idle_interval_count=0" in sql.replace(" ", "")
+
+
+def _split_top_level(text):
+    """Split on commas at paren-depth 0 so 'CASE WHEN ... THEN a, b ELSE c END'
+    style expressions containing commas inside parens aren't torn apart."""
+    items, current, depth = [], [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _insert_column_list(sql, table="device_daily_facts"):
+    marker = f"INSERT INTO {table} ("
+    start = sql.index(marker) + len(marker)
+    end = sql.index(")", start)
+    return _split_top_level(sql[start:end])
+
+
+def _select_expression_list(sql):
+    end = sql.index("FROM intervals i")
+    # The outer SELECT (not the CTE's inner one) is the last SELECT before
+    # "FROM intervals i".
+    start = sql.rindex("SELECT", 0, end) + len("SELECT")
+    return _split_top_level(sql[start:end])
+
+
+def _values_tuple_list(sql):
+    start = sql.index("VALUES (") + len("VALUES (")
+    end = sql.index(")\n", start)
+    return _split_top_level(sql[start:end])
+
+
+def test_insert_columns_and_select_list_stay_aligned():
+    # Guarda contra el riesgo del brief: si la lista de columnas del INSERT y
+    # la lista del SELECT se desalinean por posición, los minutos de un
+    # estado terminan escritos silenciosamente en la columna de otro.
+    conn, cur = _conn_with_cursor()
+    reporting.refresh_daily_facts(conn, 52, date(2026, 6, 22), "America/Santiago", "algo")
+    sql, _ = cur.execute.call_args.args
+    cols = _insert_column_list(sql)
+    selects = _select_expression_list(sql)
+    assert len(cols) == len(selects)
+
+    idx = cols.index("idle_minutes")
+    assert "state='IDLE'" in selects[idx].replace(" ", "")
+    assert "on_sched" not in selects[idx]
+
+    idx = cols.index("idle_minutes_on_schedule")
+    assert "state='IDLE'" in selects[idx].replace(" ", "")
+    assert "on_sched/60.0" in selects[idx].replace(" ", "")
+
+    idx = cols.index("idle_minutes_off_schedule")
+    assert "state='IDLE'" in selects[idx].replace(" ", "")
+    assert "on_sched)/60.0" in selects[idx].replace(" ", "")
+
+    idx = cols.index("idle_interval_count")
+    assert "state='IDLE'" in selects[idx].replace(" ", "")
+    assert "SUM(CASE" in selects[idx]
+
+
+def test_blank_facts_insert_columns_and_values_stay_aligned():
+    # Mismo riesgo estructural pero para _upsert_blank_facts, el camino de día
+    # especial: nadie lo ejerce contra una base de datos real, solo por lectura.
+    conn, cur = _conn_with_cursor()
+    special = {"2026-06-22": {"workHours": None}}
+    reporting.refresh_daily_facts(conn, 52, date(2026, 6, 22), "America/Santiago",
+                                  "algo", special_days=special)
+    sql, _ = cur.execute.call_args.args
+    cols = _insert_column_list(sql)
+    values = _values_tuple_list(sql)
+    assert len(cols) == len(values)
+    assert values[cols.index("idle_minutes")] == "0"
+    assert values[cols.index("idle_minutes_on_schedule")] == "0"
+    assert values[cols.index("idle_minutes_off_schedule")] == "0"
+    assert values[cols.index("idle_interval_count")] == "0"
+    assert values[cols.index("computed_at")] == "now()"

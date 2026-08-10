@@ -16,8 +16,7 @@ def is_no_work_special_day(special_days: Optional[Dict[str, Any]], d: date) -> b
     return "start" not in wh or "end" not in wh
 
 
-def _upsert_blank_facts(conn, device_id, day, source) -> None:
-    sql = """
+_BLANK_FACTS_SQL = """
     INSERT INTO device_daily_facts (
       device_id, day, source,
       total_minutes,
@@ -40,15 +39,14 @@ def _upsert_blank_facts(conn, device_id, day, source) -> None:
       idle_interval_count=0,
       computed_at=now();
     """
+
+
+def _upsert_blank_facts(conn, device_id, day, source) -> None:
     with conn.cursor() as cur:
-        cur.execute(sql, {"device_id": device_id, "day": day, "source": source})
+        cur.execute(_BLANK_FACTS_SQL, {"device_id": device_id, "day": day, "source": source})
 
 
-def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> None:
-    if is_no_work_special_day(special_days, day):
-        _upsert_blank_facts(conn, device_id, day, source)
-        return
-    sql = """
+_FACTS_SQL = """
     INSERT INTO device_daily_facts (
       device_id, day, source,
       total_minutes,
@@ -116,8 +114,14 @@ def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> 
       idle_interval_count              = EXCLUDED.idle_interval_count,
       computed_at                      = EXCLUDED.computed_at;
     """
+
+
+def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> None:
+    if is_no_work_special_day(special_days, day):
+        _upsert_blank_facts(conn, device_id, day, source)
+        return
     with conn.cursor() as cur:
-        cur.execute(sql, {"device_id": device_id, "day": day, "tz": tz, "source": source})
+        cur.execute(_FACTS_SQL, {"device_id": device_id, "day": day, "tz": tz, "source": source})
 
 
 def refresh_classification_facts(conn, device_id, day, tz, unassigned_id, source,
