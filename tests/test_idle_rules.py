@@ -72,3 +72,14 @@ def test_unlabelled_sample_does_not_reset_the_gap_counter():
     # NADA debe absorberse.
     labels = ["LOAD"] + ["OFF"] * 6 + ["CERO", "IDLE", "LOAD"]
     assert absorb_short_gaps(labels, max_samples=5) == labels
+
+
+def test_a_segment_opening_on_a_lone_load_absorbs_a_short_gap():
+    # Desviación deliberada del notebook (ver docstring de absorb_short_gaps):
+    # un tramo del motor puede abrir en LOAD justo después de un hueco de
+    # reporte >300s (segment_bounds corta ahí). Con range(1,..) ese LOAD
+    # inicial en el índice 0 nunca se ve, `started` no se activa a tiempo, y
+    # el hueco corto que sigue jamás se absorbe. Empezando en el índice 0 sí
+    # se absorbe, igual que si el mismo hueco apareciera en medio del tramo.
+    labels = ["LOAD", "OFF", "OFF", "LOAD"]
+    assert absorb_short_gaps(labels, max_samples=5) == ["LOAD"] * 4

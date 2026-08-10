@@ -64,20 +64,31 @@ def absorb_short_gaps(labels: List[str], max_samples: int) -> List[str]:
     """"Tramos cortos": un hueco de IDLE/OFF entre dos LOAD, más corto que
     `max_samples`, pasa a LOAD.
 
-    Réplica de la celda [16] del notebook, y las tres rarezas son deliberadas:
-    - arranca en el índice 1, no en 0;
+    Réplica de la celda [16] del notebook, con DOS rarezas fieles al original
+    y UNA desviación deliberada:
     - `cuenta` cuenta SÓLO IDLE y OFF, así que una muestra sin clasificar
-      (`_UNSET`) es TRANSPARENTE: ni suma ni reinicia el contador. Resolverla
+      (`UNSET`) es TRANSPARENTE: ni suma ni reinicia el contador. Resolverla
       antes de este paso rompe la clasificación en cada arranque de motor
       (el pico de corriente queda LOAD y reinicia el contador);
     - el bloque que se convierte es el rango POSICIONAL `range(i - cuenta, i)`,
-      no la lista de índices del hueco. Con un `_UNSET` intercalado los dos
-      conjuntos no coinciden.
+      no la lista de índices del hueco. Con un `UNSET` intercalado los dos
+      conjuntos no coinciden;
+    - arranca en el índice 0, NO en el índice 1 de la celda [16]. Esta es la
+      única desviación deliberada del notebook, y está probada (ver
+      test_a_segment_opening_on_a_lone_load_absorbs_a_short_gap): el notebook
+      consulta un día completo que SIEMPRE abre con la máquina apagada, así
+      que su autor nunca pudo observar un `LOAD` en el índice 0 y `range(1,..)`
+      nunca le costó nada. Los tramos de este motor sí pueden abrir en LOAD
+      (huecos de reporte >300s cortando el día a mitad de un tramo activo,
+      ver `segment_bounds`), y con `range(1,..)` ese LOAD inicial nunca marca
+      `started = True`, así que el hueco que lo sigue jamás se absorbe. NO
+      restaurar `range(1, len(out))`: los fixtures dorados no lo detectan
+      (los tres arrancan en OFF) pero es una regresión real.
     """
     out = list(labels)
     started = False
     cuenta = 0
-    for i in range(1, len(out)):
+    for i in range(len(out)):
         if started:
             if out[i] == "IDLE" or out[i] == "OFF":
                 cuenta += 1
