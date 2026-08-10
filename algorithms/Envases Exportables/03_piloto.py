@@ -5,7 +5,7 @@ from engine.algorithms import IdleThresholdAlgorithm
 # ("Exportable", id 66), escrito sobre el device_id del piloto. Tres estados:
 # OFF / IDLE / LOAD. Los umbrales son de ESTA máquina; la separación IDLE/LOAD
 # es menor al 5%, así que ninguna otra puede reutilizarlos sin su propio día de
-# calibración. Ver docs/superpowers/specs/2026-08-10-envases-idle-state-design.md
+# calibración. Ver docs/2026-08-10-envases-idle-deploy.md
 ALGORITHM = IdleThresholdAlgorithm(
     company="Envases Exportables",
     device_key="03-piloto",
