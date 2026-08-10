@@ -116,7 +116,7 @@ class IdleThresholdAlgorithm(StatusAlgorithm):
 
     Cada constante del notebook es un campo, así que una segunda máquina es un
     archivo nuevo y no código nuevo. Ver
-    docs/superpowers/specs/2026-08-10-envases-idle-state-design.md.
+    docs/2026-08-10-envases-idle-deploy.md.
     """
     off_threshold: float = 5.0
     idle_threshold_low: float = 18.3
