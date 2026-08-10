@@ -64,21 +64,31 @@ def absorb_short_gaps(labels: List[str], max_samples: int) -> List[str]:
     """"Tramos cortos": un hueco de IDLE/OFF entre dos LOAD, más corto que
     `max_samples`, pasa a LOAD.
 
-    Sólo actúa después del primer LOAD (`empieza` en el notebook) y sólo cuando
-    el hueco CIERRA contra otro LOAD, así que un hueco final nunca se absorbe.
+    Réplica de la celda [16] del notebook, y las tres rarezas son deliberadas:
+    - arranca en el índice 1, no en 0;
+    - `cuenta` cuenta SÓLO IDLE y OFF, así que una muestra sin clasificar
+      (`_UNSET`) es TRANSPARENTE: ni suma ni reinicia el contador. Resolverla
+      antes de este paso rompe la clasificación en cada arranque de motor
+      (el pico de corriente queda LOAD y reinicia el contador);
+    - el bloque que se convierte es el rango POSICIONAL `range(i - cuenta, i)`,
+      no la lista de índices del hueco. Con un `_UNSET` intercalado los dos
+      conjuntos no coinciden.
     """
     out = list(labels)
     started = False
-    gap: List[int] = []
-    for i, label in enumerate(out):
-        if label == "LOAD":
-            if started and 0 < len(gap) < max_samples:
-                for j in gap:
-                    out[j] = "LOAD"
-            gap = []
+    cuenta = 0
+    for i in range(1, len(out)):
+        if started:
+            if out[i] == "IDLE" or out[i] == "OFF":
+                cuenta += 1
+            if out[i] == "LOAD":
+                if cuenta > 0:
+                    if cuenta < max_samples:
+                        for j in range(i - cuenta, i):
+                            out[j] = "LOAD"
+                    cuenta = 0
+        if not started and out[i] == "LOAD":
             started = True
-        elif started:
-            gap.append(i)
     return out
 
 
@@ -101,10 +111,10 @@ def segment_bounds(times: Sequence[datetime], gap_seconds: float) -> List[Tuple[
     return bounds
 
 
-_UNSET = "CERO"
+UNSET = "CERO"
 
 
-def _fallback(value: float, params: IdleParams) -> str:
+def resolve_unlabelled(value: float, params: IdleParams) -> str:
     """Etiqueta de respaldo para muestras que el notebook deja en 'CERO'.
 
     El notebook admite dejar muestras sin clasificar (calentamiento de las
@@ -131,8 +141,13 @@ def classify_segment(values: np.ndarray, sigma: np.ndarray,
 
     `donde`: 0 = apagada, 1 = borde (sigma alta, clasificación diferida),
     2 = dentro de un tramo estable.
+
+    Las muestras que el notebook deja sin clasificar quedan en `UNSET`: esta
+    función NO las resuelve. `absorb_short_gaps` necesita verlas intactas para
+    que el centinela sea transparente a su contador (ver su docstring); la
+    resolución ocurre después, en `IdleThresholdAlgorithm.classify`.
     """
-    labels = [_UNSET] * len(values)
+    labels = [UNSET] * len(values)
     threshold = params.idle_threshold_high
     pending = 0
     donde = 0
@@ -157,5 +172,4 @@ def classify_segment(values: np.ndarray, sigma: np.ndarray,
         else:
             labels[i] = "LOAD" if value > threshold else "IDLE"
 
-    return [lbl if lbl != _UNSET else _fallback(values[i], params)
-            for i, lbl in enumerate(labels)]
+    return labels

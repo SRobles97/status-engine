@@ -2,7 +2,7 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 
 from engine.idle_rules import (
-    IdleParams, rolling_sigma, rolling_min, select_threshold,
+    IdleParams, select_threshold,
     absorb_short_gaps, segment_bounds, classify_segment,
 )
 
@@ -65,19 +65,10 @@ def test_below_off_threshold_is_off():
     assert classify_segment(values, zeros, zeros, P) == ["OFF", "OFF", "OFF"]
 
 
-def test_no_sample_is_ever_left_unlabelled():
-    rng = np.random.default_rng(0)
-    values = np.concatenate([np.full(50, 0.1), rng.uniform(18.0, 21.0, 200)])
-    sigma = rolling_sigma(values, P.sigma_window)
-    min5 = rolling_min(values, P.min_window)
-    labels = classify_segment(values, sigma, min5, P)
-    assert len(labels) == len(values)
-    assert set(labels) <= {"OFF", "IDLE", "LOAD"}
-    assert "CERO" not in labels
-
-
-def test_warmup_uses_the_two_threshold_fallback():
-    # Before sigma_window samples the rolling stats are undefined
-    values = np.array([18.5, 20.0, 4.0])
-    zeros = np.zeros(3)
-    assert classify_segment(values, zeros, zeros, P) == ["IDLE", "LOAD", "OFF"]
+def test_unlabelled_sample_does_not_reset_the_gap_counter():
+    # El pico de arranque del motor queda sin clasificar en el notebook. Si se
+    # resolviera a LOAD antes de absorber, reiniciaría el contador y el IDLE
+    # siguiente se absorbería. Con 6 OFF previos el hueco mide 7 >= 5, así que
+    # NADA debe absorberse.
+    labels = ["LOAD"] + ["OFF"] * 6 + ["CERO", "IDLE", "LOAD"]
+    assert absorb_short_gaps(labels, max_samples=5) == labels

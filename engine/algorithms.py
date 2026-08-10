@@ -9,9 +9,11 @@ import pandas as pd
 from sklearn.cluster import KMeans
 
 from engine.idle_rules import (
+    UNSET,
     IdleParams,
     absorb_short_gaps,
     classify_segment,
+    resolve_unlabelled,
     rolling_min,
     rolling_sigma,
     segment_bounds,
@@ -151,5 +153,11 @@ class IdleThresholdAlgorithm(StatusAlgorithm):
                 rolling_min(chunk, self.min_window),
                 params,
             )
-            labels.extend(absorb_short_gaps(segment, self.short_gap_samples))
+            segment = absorb_short_gaps(segment, self.short_gap_samples)
+            # El centinela se resuelve AL FINAL: ver el docstring de
+            # absorb_short_gaps. El orden es parte del contrato, no un detalle.
+            labels.extend(
+                lbl if lbl != UNSET else resolve_unlabelled(chunk[i], params)
+                for i, lbl in enumerate(segment)
+            )
         return pd.Series(labels, index=df.index)

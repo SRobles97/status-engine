@@ -109,6 +109,28 @@ def test_name_is_idle_threshold():
     assert _algo().name == "idle_threshold"
 
 
+def test_no_sample_is_ever_left_unlabelled():
+    # Relocated from tests/test_idle_rules.py: the guarantee moved with the
+    # resolution step, which now happens in classify() after absorb_short_gaps,
+    # not in classify_segment.
+    rng = np.random.default_rng(0)
+    values = np.concatenate([np.full(50, 0.1), rng.uniform(18.0, 21.0, 200)])
+    out = list(_algo().classify(_df(values)))
+    assert len(out) == len(values)
+    assert set(out) <= {"OFF", "IDLE", "LOAD"}
+    assert "CERO" not in out
+
+
+def test_warmup_uses_the_two_threshold_fallback():
+    # Relocated from tests/test_idle_rules.py, same reason as above. Before
+    # sigma_window samples the rolling stats are undefined (rolling_sigma and
+    # rolling_min both leave the warm-up prefix at 0.0), which is exactly the
+    # scenario the old test built by hand with `zeros`.
+    values = np.array([18.5, 20.0, 4.0])
+    out = list(_algo().classify(_df(values)))
+    assert out == ["IDLE", "LOAD", "OFF"]
+
+
 def test_classify_labels_every_sample():
     values = np.concatenate([np.full(30, 0.1), np.full(120, 18.5), np.full(60, 20.5)])
     out = _algo().classify(_df(values))
