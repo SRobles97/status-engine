@@ -122,6 +122,11 @@ class IdleThresholdAlgorithm(StatusAlgorithm):
     idle_threshold_low: float = 18.3
     idle_threshold_high: float = 19.0
     sigma_window: int = 59
+    # Hoy es inerte: select_threshold ignora min5 (U1/U2/U4 del notebook quedaron
+    # numéricamente iguales tras la calibración), así que este valor no cambia
+    # ninguna clasificación. Se conserva por fidelidad al notebook — que sigue
+    # calculando rolling_min sobre cada muestra — y para una futura recalibración
+    # donde U1/U2/U4 vuelvan a divergir.
     min_window: int = 24
     short_gap_samples: int = 5
     gap_seconds: float = 300.0

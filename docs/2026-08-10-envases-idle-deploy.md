@@ -2,11 +2,33 @@
 
 This turns on the three-state (OFF / IDLE / LOAD) classifier for Envases
 Exportables device `03` ("Exportable", id 66, company 14), rendered on its
-piloto twin `03-piloto`, exactly as `F1-piloto` and `TBX_O-piloto` already
-work today. Everything this deploy touches has been sitting inert — no
-algorithm currently sets `emits_idle=True` and no device has
-`card_source='algoritmo'` — so until you finish the steps below, nothing
-anywhere behaves any differently.
+piloto twin `03-piloto`, exactly as `F1-piloto` and the Tubexa/Revesol
+pilotos already work today.
+
+**This is not a deploy into a clean slate.** Five hidden piloto devices
+already carry `card_source='algoritmo'`:
+
+```
+ id |  device_key   | company_id | is_hidden | card_source
+ 63 | F1-piloto     |          6 | t         | algoritmo
+ 68 | tbxo-piloto   |          3 | t         | algoritmo
+ 69 | tbxp-piloto   |          3 | t         | algoritmo
+ 70 | rev1-piloto   |          9 | t         | algoritmo
+ 71 | tubera-piloto |         13 | t         | algoritmo
+```
+
+The Flutter card gates on `device.cardSource == 'algoritmo'`
+(`machine_card_content.dart:50`), so **all five switch to the three-band bar
+the moment the app's web build ships** — not just `03-piloto`. Their cards
+lose the centred efficiency percentage and show amber (IDLE) permanently at
+0%, because none of their algorithms currently emit IDLE.
+
+This is a deliberate, accepted consequence, not an oversight: all five are
+`is_hidden = true`, and `visible_devices_provider.dart` filters hidden
+devices out for every non-superuser — so no client ever sees the changed
+card. Only superusers, who already understand these are validation twins,
+will see it. This matches the app's existing convention for piloto devices
+and needs no code change to accept.
 
 Three repositories are involved, each with its own unpushed `feat/idle-state`
 branch:
@@ -17,11 +39,16 @@ branch:
 | `backend` | `feat/idle-state` | facts mirror, card payload, energy, reports |
 | `smart_look_app` | `feat/idle-state` | the three-band bar |
 
-Read the two warnings below before you touch anything. Both produce **silent**
-wrong behaviour — no crash, no error in the logs, just numbers that are wrong
-or missing — which is exactly the kind of thing that eats an on-call shift.
+Read the three items below before you touch anything: two deploy-ordering
+hazards and one known gap this deploy ships with. Hazard #2 is genuinely
+silent — wrong numbers, no error, nothing in the logs to point at it.
+Hazard #1 is loud (a red row in `status_run_log`), but only if you know to
+look there, so it is included for the same reason: skip it and you burn an
+on-call shift on the wrong theory. #3 is not a deploy hazard at all — it is
+a scope decision, documented so the next person does not have to rediscover
+it.
 
-## Read this first: two ways to silently break this
+## Read this first: two deploy-ordering hazards, and one known gap
 
 ### 1. The migration must land before the engine does
 
@@ -29,11 +56,25 @@ or missing — which is exactly the kind of thing that eats an on-call shift.
 idle minutes in `device_daily_facts`. If the engine (built with
 `emits_idle=True` for `03-piloto`) runs against a database that does not yet
 have the idle columns — or if somehow an old engine build runs after the
-migration — the IDLE minutes get written as `device_state_intervals` rows and
-then **vanish** when facts are aggregated. There is no error. The numbers are
-just absent from `device_daily_facts`. If you ever see a piloto with IDLE
-intervals in the interval table but zero idle minutes in the daily facts,
-this is why — check the migration first.
+migration — this fails **loudly and atomically, not silently**. The SQL in
+`refresh_daily_facts` names `idle_minutes` (and the other three idle
+columns) directly in its `INSERT`, so against a database missing them
+Postgres raises `UndefinedColumn`. The engine runs one savepoint per
+algorithm (`engine/runner.py`) specifically so a failure like this can't
+poison the shared transaction or the algorithms that ran before it: the
+savepoint rolls back, so **the entire tick for that algorithm — including
+the `device_state_intervals` rows it would have written — is undone**,
+nothing partial is left behind, and `status_run_log` gets a row for
+`03-piloto` with `result = 'error'` and the `UndefinedColumn` message in
+it. Every subsequent tick repeats the same failure until the migration
+lands.
+
+What you will actually see if you get the order wrong: no new intervals for
+`03-piloto`, no new daily facts, and a run of `error` rows in
+`status_run_log` naming the missing column. Nothing "vanishes" — there is
+never anything to vanish, because the savepoint means it was never
+committed in the first place. If `03-piloto` looks frozen after a deploy,
+read `status_run_log` before looking anywhere else.
 
 **Order that must be respected: migration → engine → everything else.**
 
@@ -51,21 +92,78 @@ send you down the wrong path chasing the classifier instead of the missing
 schedule. Copy device 66's `schedules` rows onto `03-piloto` in the same step
 you create the device — do not treat it as a follow-up.
 
+### 3. Known limitation: the report screens do not know about IDLE (documented, not fixed here)
+
+Unlike hazards #1 and #2, this one is not a way to *break* the deploy — it
+is a gap the deploy ships with, on purpose, deferred to a follow-up.
+
+Two backend aggregations compute a device's "total" time from `LOAD` and
+`OFF` only, with no `IDLE` term:
+
+- `backend/app/database/intervals_repository.py:564`, inside
+  `get_device_time_statistics` —
+  `total_time_minutes = round(load_minutes + total_off_minutes, 2)`.
+- `backend/app/database/intervals_repository.py:910`, inside
+  `_aggregate_trends` —
+  `grand_total = p_load_minutes_on + p_allowed_off_minutes_on + p_off_minutes_on`.
+
+Neither has an `idle_minutes` term. On a `card_source='algoritmo'` device
+these functions do not count IDLE minutes as "accounted for", so **Estadísticas
+de tiempo** renders IDLE minutes as *"Programado sin datos"* — the gap
+between recorded and scheduled time — even though the engine classified
+them correctly and the card shows them correctly as the amber band. On the
+fixture days used to build this feature, IDLE is 35–53% of samples, so this
+is not a rounding-error-sized gap.
+
+Separately: the one endpoint that *did* gain an `idle_hours` field,
+`/api/reports/work-schedule`, is never called by the app — grepping `lib/`
+for it returns zero hits. So fixing just that endpoint would not close the
+gap the client actually sees; the two functions named above are where the
+client-visible screens actually live.
+
+**This deploy ships with the gap documented, not fixed.** Once `03-piloto`
+is shown to the client (see the visibility note in step 3 below), its
+**Estadísticas de tiempo** and trend reports will misattribute idle time
+until someone teaches `get_device_time_statistics` and `_aggregate_trends`
+about the `IDLE` state. Do that before the piloto is client-visible, not
+after.
+
 ## Deploy steps, in order
 
 ### 1. Pre-flight: confirm the card's shift-info assumption still holds
 
 Before doing anything, run this against the target database and confirm
-neither row has a null `total_schedule_minutes`:
+none of the five rows has a null `total_schedule_minutes`:
 
 ```sql
 SELECT d.device_key, s.shift_start, s.shift_end, s.total_schedule_minutes
 FROM devices d LEFT JOIN device_current_status s ON s.device_id = d.id
-WHERE d.device_key IN ('F1-piloto', 'TBX_O-piloto');
+WHERE d.device_key IN
+  ('F1-piloto', 'tbxo-piloto', 'tbxp-piloto', 'rev1-piloto', 'tubera-piloto');
 ```
 
-Both existing pilotos read their shift info this way today, which is the
-basis for hazard #2 above. If either row has a null `total_schedule_minutes`,
+(Note the real key is `tbxo-piloto`, not `TBX_O-piloto` — a query using the
+wrong key silently returns fewer rows and the "confirm none is null" check
+passes vacuously on whichever piloto it missed.)
+
+Already run against real data — recorded here so you have something to
+compare against instead of running blind:
+
+```
+F1-piloto      510
+tbxo-piloto    510
+tbxp-piloto    510
+rev1-piloto    510
+tubera-piloto  530
+```
+
+All non-null, which confirms hazard #2's mechanism against real data. For
+comparison, device 66 (`03`, the machine `03-piloto` will mirror) reads
+`total_schedule_minutes = 540` — that is the value `03-piloto` should also
+read once you copy its schedule rows in step 3.
+
+All five existing pilotos read their shift info this way today, which is
+the basis for hazard #2 above. If any row has a null `total_schedule_minutes`,
 the design assumption behind this runbook does not hold on this database —
 **stop and re-check the design doc before deploying anything else.**
 
@@ -87,11 +185,23 @@ Create the device:
 - `measurement_source = 'power'`
 - `card_source = 'algoritmo'`
 - `timezone = 'America/Santiago'`
+- `is_hidden = true` — `devices.is_hidden` defaults to `false`, but every
+  existing piloto (`F1-piloto`, `tbxo-piloto`, `tbxp-piloto`, `rev1-piloto`,
+  `tubera-piloto`) is hidden. Creating `03-piloto` visible puts a **second
+  card for the same physical machine** on Envases Exportables' dashboard,
+  showing lower worked minutes than the real `03` card beside it — this
+  machine has not been validated against real Exportable data yet, so it
+  stays a superuser-only twin until it has.
 
 Then, in the same step, copy device `66`'s (`03`'s) `schedules` rows onto the
 new piloto's device id. Do not defer this — see hazard #2. Skipping it does
 not fail loudly; it produces a card that looks broken while everything else
 is working.
+
+**When you are ready to show the client:** once the bands have been
+validated against real Exportable data for a representative stretch of
+days, flip `03-piloto.is_hidden` to `false`. That is the only change needed
+to reveal it — nothing else in this runbook is gated on visibility.
 
 ### 4. Deploy status-engine
 
@@ -137,10 +247,16 @@ Delete `algorithms/Envases Exportables/03_piloto.py` and rebuild the engine
 (`docker-compose up --build`). `03-piloto` simply stops being classified and
 stops updating — nothing else needs to be touched. Leave the migration in
 place; its columns are additive and default to `0`, so they are harmless on
-any device that never emits IDLE. Nothing else in this deploy needs
-reverting: every other change (backend routing, the app's three-band bar) is
-inert until some device actually has `card_source='algoritmo'`, and after
-this rollback none does.
+any device that never emits IDLE.
+
+Note this rollback only un-does `03-piloto`. It does **not** touch the five
+pilotos that already had `card_source='algoritmo'` before this deploy
+(`F1-piloto`, `tbxo-piloto`, `tbxp-piloto`, `rev1-piloto`,
+`tubera-piloto`) — those keep whatever behaviour the backend/app deploy
+steps (6) gave them regardless of whether you roll `03-piloto` back. If the
+three-band bar itself needs to come out for those five, that is an app-side
+rollback (revert the app's `feat/idle-state` branch), not something this
+engine-side rollback reaches.
 
 ## What was not verified before this handoff
 

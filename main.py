@@ -1,14 +1,38 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from engine import repository as default_repo
 from engine.config import Settings
-from engine.discovery import discover
+from engine.discovery import DiscoveredAlgorithm, discover
 from engine.runner import run_all
+
+
+def _warn_gap_seconds_mismatch(discovered: list[DiscoveredAlgorithm], settings: Settings) -> None:
+    """Avisa si el `gap_seconds` de un algoritmo (usado por `classify` para
+    segmentar sigma/Min5/donde) difiere del `gap_seconds` global de
+    `Settings` (env `GAP_SECONDS`, usado por `collapse_runs` al construir
+    intervalos). Hoy ambos valen 300 por defecto y coinciden siempre, pero
+    nada los ata: si algún día difieren, el clasificador segmentaría en un
+    punto distinto de donde el motor cierra los intervalos, produciendo un
+    mal etiquetado sutil sin error ni log. Solo advierte — una diferencia
+    deliberada no debe tumbar el motor, y no se sobreescribe el valor del
+    algoritmo.
+    """
+    for d in discovered:
+        algo_gap = getattr(d.algorithm, "gap_seconds", None)
+        if algo_gap is not None and algo_gap != settings.gap_seconds:
+            print(
+                f"[status-engine] ADVERTENCIA: {d.algorithm.device_key} usa "
+                f"gap_seconds={algo_gap} para clasificar pero el motor arma "
+                f"los intervalos con Settings.gap_seconds={settings.gap_seconds} "
+                "(env GAP_SECONDS) — revisa si la diferencia es intencional.",
+                file=sys.stderr,
+            )
 
 
 def run_iteration(settings: Settings, *, repo=default_repo, now: datetime | None = None):
@@ -21,6 +45,7 @@ def run_iteration(settings: Settings, *, repo=default_repo, now: datetime | None
             Path(settings.algorithms_dir),
             resolver=lambda c, d: repo.resolve_device_id(conn, d),
         )
+        _warn_gap_seconds_mismatch(discovered, settings)
         results = run_all(repo, conn, discovered,
                           now, settings.status_window_days, settings.default_tz,
                           on_schedule_only=settings.on_schedule_only,

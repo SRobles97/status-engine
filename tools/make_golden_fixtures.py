@@ -75,6 +75,17 @@ NOTEBOOK = (Path(__file__).resolve().parents[2]
             / "algoritmos" / "Envases Exportables" / "Desarrollo"
             / "Desarrollo Disp EnvExp Mold1.ipynb")
 PIPELINE_CELLS = [10, 11, 14, 16]
+# Substring distintivo por índice de celda. El chequeo de cell_type != "code"
+# detecta que alguien insertó markdown, pero no que reordenaron o insertaron
+# celdas de código: el índice seguiría siendo "código" pero apuntaría a la
+# celda equivocada, y el fixture dorado se generaría en silencio con la
+# tubería incorrecta. Verificado contra el notebook real (celdas 10/11/14/16).
+PIPELINE_CELL_MARKERS = {
+    10: "Clusters_strg",  # crea data_with_clusters e inserta las columnas de estado
+    11: "Sigma",  # llena Sigma (std de las 59 previas) y Min5 (min de las 24 previas)
+    14: "cuenta",  # clasificación por umbrales diferenciados
+    16: "empieza",  # tramos cortos: absorbe huecos entre dos LOAD
+}
 
 
 def notebook_sources(path: Path, indices: list[int]) -> list[tuple[int, str]]:
@@ -89,7 +100,17 @@ def notebook_sources(path: Path, indices: list[int]) -> list[tuple[int, str]]:
         cell = nb["cells"][i]
         if cell["cell_type"] != "code":
             raise SystemExit(f"la celda {i} no es código, es {cell['cell_type']}")
-        out.append((i, "".join(cell["source"])))
+        source = "".join(cell["source"])
+        marker = PIPELINE_CELL_MARKERS.get(i)
+        if marker is not None and marker not in source:
+            raise SystemExit(
+                f"la celda {i} no contiene el marcador esperado {marker!r}: el "
+                "notebook parece haberse reordenado o le insertaron/borraron "
+                "celdas de código, y este índice ya no apunta al paso de la "
+                "tubería que se espera ahí. Revisá manualmente cuál celda "
+                "corresponde a cada paso y actualizá PIPELINE_CELLS y "
+                "PIPELINE_CELL_MARKERS en este script antes de regenerar fixtures.")
+        out.append((i, source))
     return out
 
 

@@ -1,7 +1,7 @@
 -- status-engine/sql/migrations/2026-08-10_device_daily_facts_idle_columns.sql
 --
 -- IDLE pasa a ser un estado propio en device_state_intervals (ver
--- docs/superpowers/specs/2026-08-10-envases-idle-state-design.md). Los hechos
+-- docs/2026-08-10-envases-idle-deploy.md). Los hechos
 -- diarios necesitan sus propias columnas: sin ellas los minutos IDLE quedarían
 -- sumados dentro de total_minutes pero invisibles para la tarjeta.
 --
