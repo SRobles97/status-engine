@@ -24,16 +24,20 @@ def _upsert_blank_facts(conn, device_id, day, source) -> None:
       load_minutes, load_minutes_on_schedule, load_minutes_off_schedule,
       off_minutes, off_minutes_on_schedule, off_minutes_off_schedule,
       allowed_off_minutes, allowed_off_minutes_on_schedule, allowed_off_minutes_off_schedule,
+      idle_minutes, idle_minutes_on_schedule, idle_minutes_off_schedule,
       interval_count, load_interval_count, off_interval_count, allowed_off_interval_count,
+      idle_interval_count,
       computed_at
     )
-    VALUES (%(device_id)s, %(day)s, %(source)s, 0,0,0,0,0,0,0,0,0,0,0,0,0,0, now())
+    VALUES (%(device_id)s, %(day)s, %(source)s, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, now())
     ON CONFLICT (device_id, day, source) DO UPDATE SET
       total_minutes=0,
       load_minutes=0, load_minutes_on_schedule=0, load_minutes_off_schedule=0,
       off_minutes=0, off_minutes_on_schedule=0, off_minutes_off_schedule=0,
       allowed_off_minutes=0, allowed_off_minutes_on_schedule=0, allowed_off_minutes_off_schedule=0,
+      idle_minutes=0, idle_minutes_on_schedule=0, idle_minutes_off_schedule=0,
       interval_count=0, load_interval_count=0, off_interval_count=0, allowed_off_interval_count=0,
+      idle_interval_count=0,
       computed_at=now();
     """
     with conn.cursor() as cur:
@@ -51,7 +55,9 @@ def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> 
       load_minutes, load_minutes_on_schedule, load_minutes_off_schedule,
       off_minutes, off_minutes_on_schedule, off_minutes_off_schedule,
       allowed_off_minutes, allowed_off_minutes_on_schedule, allowed_off_minutes_off_schedule,
+      idle_minutes, idle_minutes_on_schedule, idle_minutes_off_schedule,
       interval_count, load_interval_count, off_interval_count, allowed_off_interval_count,
+      idle_interval_count,
       computed_at
     )
     WITH intervals AS (
@@ -78,10 +84,14 @@ def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> 
       COALESCE(SUM(CASE WHEN i.state='OFF' AND i.is_allowed THEN i.dur/60.0 ELSE 0 END), 0)::real,
       COALESCE(SUM(CASE WHEN i.state='OFF' AND i.is_allowed THEN i.on_sched/60.0 ELSE 0 END), 0)::real,
       COALESCE(SUM(CASE WHEN i.state='OFF' AND i.is_allowed THEN (i.dur - i.on_sched)/60.0 ELSE 0 END), 0)::real,
+      COALESCE(SUM(CASE WHEN i.state='IDLE' THEN i.dur/60.0 ELSE 0 END), 0)::real,
+      COALESCE(SUM(CASE WHEN i.state='IDLE' THEN i.on_sched/60.0 ELSE 0 END), 0)::real,
+      COALESCE(SUM(CASE WHEN i.state='IDLE' THEN (i.dur - i.on_sched)/60.0 ELSE 0 END), 0)::real,
       COUNT(*)::int,
       SUM(CASE WHEN i.state='LOAD' THEN 1 ELSE 0 END)::int,
       SUM(CASE WHEN i.state='OFF'  THEN 1 ELSE 0 END)::int,
       SUM(CASE WHEN i.state='OFF' AND i.is_allowed THEN 1 ELSE 0 END)::int,
+      SUM(CASE WHEN i.state='IDLE' THEN 1 ELSE 0 END)::int,
       now()
     FROM intervals i
     GROUP BY i.device_id
@@ -96,10 +106,14 @@ def refresh_daily_facts(conn, device_id, day, tz, source, special_days=None) -> 
       allowed_off_minutes              = EXCLUDED.allowed_off_minutes,
       allowed_off_minutes_on_schedule  = EXCLUDED.allowed_off_minutes_on_schedule,
       allowed_off_minutes_off_schedule = EXCLUDED.allowed_off_minutes_off_schedule,
+      idle_minutes                     = EXCLUDED.idle_minutes,
+      idle_minutes_on_schedule         = EXCLUDED.idle_minutes_on_schedule,
+      idle_minutes_off_schedule        = EXCLUDED.idle_minutes_off_schedule,
       interval_count                   = EXCLUDED.interval_count,
       load_interval_count              = EXCLUDED.load_interval_count,
       off_interval_count               = EXCLUDED.off_interval_count,
       allowed_off_interval_count       = EXCLUDED.allowed_off_interval_count,
+      idle_interval_count              = EXCLUDED.idle_interval_count,
       computed_at                      = EXCLUDED.computed_at;
     """
     with conn.cursor() as cur:
