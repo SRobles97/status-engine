@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
 
-from engine.algorithms import ThresholdAlgorithm
+from engine.algorithms import IdleThresholdAlgorithm, ThresholdAlgorithm
 from engine import intervals as intervals_mod
 from engine import runner
 
@@ -88,3 +89,63 @@ def test_emit_algo_intervals_preserves_idle_when_flag_true():
         f"IDLE should be preserved, but got: {statuses_arg}")
     assert statuses_arg == ["OFF", "IDLE", "LOAD"], (
         f"Expected ['OFF', 'IDLE', 'LOAD'], got: {statuses_arg}")
+
+
+def _df(values, step_seconds=2):
+    base = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+    return pd.DataFrame({
+        "time": [base + timedelta(seconds=i * step_seconds) for i in range(len(values))],
+        "total_current": values,
+    })
+
+
+def _algo(**kw):
+    return IdleThresholdAlgorithm(
+        company="Envases Exportables", device_key="03-piloto",
+        power_column="total_current", emits_idle=True, **kw)
+
+
+def test_name_is_idle_threshold():
+    assert _algo().name == "idle_threshold"
+
+
+def test_classify_labels_every_sample():
+    values = np.concatenate([np.full(30, 0.1), np.full(120, 18.5), np.full(60, 20.5)])
+    out = _algo().classify(_df(values))
+    assert len(out) == len(values)
+    assert set(out) <= {"OFF", "IDLE", "LOAD"}
+
+
+def test_classify_separates_idle_from_load():
+    # 18.0 sits BELOW the stable-stretch threshold (18.3) and 20.5 above it, so
+    # this exercises the threshold split itself. A value between 18.3 and 19.0
+    # would come back all-LOAD and the only IDLE would be the warm-up fallback.
+    values = np.concatenate([np.full(120, 18.0), np.full(120, 20.5)])
+    out = list(_algo().classify(_df(values)))
+    assert set(out[:120]) == {"IDLE"}
+    assert set(out[120:]) == {"LOAD"}
+
+
+def test_each_segment_is_classified_independently():
+    """Un hueco de reporte divide la ventana: cada tramo debe clasificarse igual
+    que si hubiera llegado solo.
+
+    Sin la división, sigma, el umbral y el estado `donde` cruzarían el hueco y
+    contaminarían el tramo siguiente. El tramo B empieza con una muestra OFF a
+    propósito: es lo que reinicia `donde` y obliga a consultar sigma de nuevo,
+    que es donde la contaminación se vuelve observable.
+    """
+    base = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
+    seg_a = np.concatenate([np.full(60, 6.0), np.full(60, 22.0)])
+    seg_b = np.concatenate([np.full(1, 0.5), np.full(119, 18.4)])
+    times_a = [base + timedelta(seconds=2 * i) for i in range(120)]
+    times_b = [base + timedelta(hours=2, seconds=2 * i) for i in range(120)]
+
+    joined = pd.DataFrame({"time": times_a + times_b,
+                           "total_current": np.concatenate([seg_a, seg_b])})
+    alone_a = pd.DataFrame({"time": times_a, "total_current": seg_a})
+    alone_b = pd.DataFrame({"time": times_b, "total_current": seg_b})
+
+    algo = _algo()
+    assert list(algo.classify(joined)) == (
+        list(algo.classify(alone_a)) + list(algo.classify(alone_b)))

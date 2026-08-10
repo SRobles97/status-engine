@@ -8,6 +8,15 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 
+from engine.idle_rules import (
+    IdleParams,
+    absorb_short_gaps,
+    classify_segment,
+    rolling_min,
+    rolling_sigma,
+    segment_bounds,
+)
+
 ALLOWED_POWER_COLUMNS = frozenset({
     "total_active_power", "total_current", "total_apparent_power",
     "phase_a_active_power", "phase_b_active_power", "phase_c_active_power",
@@ -97,3 +106,50 @@ class KMeansAlgorithm(StatusAlgorithm):
             [ladder[rank[c]] for c in km.labels_],
             index=df.index,
         )
+
+
+@dataclass(frozen=True)
+class IdleThresholdAlgorithm(StatusAlgorithm):
+    """Clasificador de tres estados por umbrales diferenciados.
+
+    Cada constante del notebook es un campo, así que una segunda máquina es un
+    archivo nuevo y no código nuevo. Ver
+    docs/superpowers/specs/2026-08-10-envases-idle-state-design.md.
+    """
+    off_threshold: float = 5.0
+    idle_threshold_low: float = 18.3
+    idle_threshold_high: float = 19.0
+    sigma_window: int = 59
+    min_window: int = 24
+    short_gap_samples: int = 5
+    gap_seconds: float = 300.0
+
+    @property
+    def name(self) -> str:
+        return "idle_threshold"
+
+    @property
+    def params(self) -> IdleParams:
+        return IdleParams(
+            off_threshold=self.off_threshold,
+            idle_threshold_low=self.idle_threshold_low,
+            idle_threshold_high=self.idle_threshold_high,
+            sigma_window=self.sigma_window,
+            min_window=self.min_window,
+        )
+
+    def classify(self, df: pd.DataFrame) -> pd.Series:
+        values = df[self.power_column].astype(float).to_numpy()
+        times = list(df["time"])
+        params = self.params
+        labels: list[str] = []
+        for lo, hi in segment_bounds(times, self.gap_seconds):
+            chunk = values[lo:hi]
+            segment = classify_segment(
+                chunk,
+                rolling_sigma(chunk, self.sigma_window),
+                rolling_min(chunk, self.min_window),
+                params,
+            )
+            labels.extend(absorb_short_gaps(segment, self.short_gap_samples))
+        return pd.Series(labels, index=df.index)
