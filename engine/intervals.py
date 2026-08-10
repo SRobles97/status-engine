@@ -47,8 +47,8 @@ def collapse_runs(
             runs.append(Run(run_state, run_start, times[i]))
             run_state = statuses[i]
             run_start = times[i]
-    # trailing run: LOAD stays open; OFF closes at the last sample
-    last_end = None if run_state == "LOAD" else times[n - 1]
+    # trailing run: LOAD/IDLE stay open (la máquina sigue energizada); OFF cierra
+    last_end = None if run_state in ("LOAD", "IDLE") else times[n - 1]
     runs.append(Run(run_state, run_start, last_end))
     return runs
 
@@ -74,8 +74,8 @@ def split_runs_at_midnight(runs: List[Run], tz_name: str) -> List[Run]:
     """Split each closed run at local-midnight boundaries so every run belongs
     to a single local day. Open runs (end=None) are returned unchanged.
 
-    Known go-forward limitation: an open (trailing) LOAD run is passed through
-    unchanged, so with STATUS_WINDOW_DAYS=0 a prior day's trailing-open LOAD is
+    Known go-forward limitation: an open (trailing) LOAD/IDLE run is passed through
+    unchanged, so with STATUS_WINDOW_DAYS=0 a prior day's trailing-open LOAD/IDLE is
     not revisited after midnight rollover. Deployments wanting the prior day's open
     interval closed should set STATUS_WINDOW_DAYS=1.
     """
@@ -204,8 +204,12 @@ def build_intervals(device_id, times, statuses, tz_name, schedules, special,
     last_sample = times[-1] if times else None
     rows: List[IntervalRow] = []
     for r in runs:
-        if r.state == "LOAD":
-            # An open (still running) LOAD run has no end yet, so score its
+        if r.state in ("LOAD", "IDLE"):
+            # IDLE se comporta como LOAD: se guarda completo y puede quedar
+            # abierto. Sólo cambia que NO cuenta como tiempo trabajado, cosa que
+            # resuelve el consumidor al leer load_* vs idle_*.
+            #
+            # An open (still running) LOAD/IDLE run has no end yet, so score its
             # schedule overlap against the last sample. Without this,
             # on_schedule_seconds stays 0 for as long as the machine keeps
             # running: refresh_daily_facts extrapolates the interval's DURATION
@@ -223,7 +227,7 @@ def build_intervals(device_id, times, statuses, tz_name, schedules, special,
                 on_s, ratio, ok = compute_on_schedule(
                     r.start, probe_end, tz_name, schedules, special, rule)
             rows.append(IntervalRow(
-                device_id=device_id, source=source, state="LOAD",
+                device_id=device_id, source=source, state=r.state,
                 start_time=r.start, end_time=r.end,
                 measurement_count=_count_samples(times, r.start, r.end),
                 is_allowed=False, on_schedule_seconds=on_s,
