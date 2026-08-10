@@ -35,8 +35,9 @@ def _classify(algo, df):
 
 
 def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
-                         schedules, special, gap_seconds, source, rule):
-    labels = intervals_mod.remap_idle_to_load(statuses_full)
+                         schedules, special, gap_seconds, source, rule,
+                         emits_idle=False):
+    labels = statuses_full if emits_idle else intervals_mod.remap_idle_to_load(statuses_full)
     times = list(df["time"])
     allowed_minutes = repo.fetch_threshold_minutes(conn, write_id)
     rows = intervals_mod.build_intervals(
@@ -113,7 +114,7 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
             statuses_full = _classify(algo, df)
             _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
                                  schedules, special, gap_seconds, interval_source,
-                                 on_schedule_rule)
+                                 on_schedule_rule, emits_idle=algo.emits_idle)
         except DegenerateWindowError as e:
             return RunResult(write_id, algo.name, len(df), 0, "skipped", str(e))
 

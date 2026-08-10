@@ -32,6 +32,10 @@ class StatusAlgorithm(ABC):
     guard_column: Optional[str] = None
     guard_min: float = 0.0
     source_device_key: Optional[str] = None
+    # Cuando es True, IDLE sobrevive como estado propio en device_state_intervals
+    # en vez de colapsarse a LOAD. Opt-in por algoritmo: los dispositivos ya
+    # desplegados (todos ThresholdAlgorithm) conservan el colapso histórico.
+    emits_idle: bool = False
 
     def __post_init__(self):
         if self.power_column not in ALLOWED_POWER_COLUMNS:
