@@ -41,6 +41,23 @@ def test_idle_interval_is_stored_whole_and_scored():
     assert idle[0].is_allowed is False
 
 
+def test_open_trailing_idle_run_is_scored_against_last_sample():
+    # Sin muestra siguiente que la cierre, el IDLE final debe quedar abierto
+    # (end_time=None) y su on_schedule_seconds debe puntuarse contra la
+    # última muestra en vez de quedar en 0 — el mismo mecanismo abierto que
+    # ya cubre LOAD, y el que dos incidentes en producción demostraron que
+    # importa vigilar de cerca.
+    rows = intervals.build_intervals(
+        device_id=1, times=[_t(0), _t(1), _t(2)],
+        statuses=["IDLE", "IDLE", "IDLE"],
+        tz_name="America/Santiago", schedules=SCHEDULES, special={},
+        allowed_minutes=None, gap_seconds=300, source="algo", rule="majority")
+    assert len(rows) == 1
+    assert rows[0].state == "IDLE"
+    assert rows[0].end_time is None
+    assert rows[0].on_schedule_seconds == 120
+
+
 def test_idle_is_not_sliced_to_the_schedule():
     # Outside every work block: OFF would be dropped, IDLE must survive whole
     # Sin ningún weekday configurado no hay bloques de trabajo en ningún día.

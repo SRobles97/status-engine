@@ -19,7 +19,7 @@ def remap_idle_to_load(statuses: pd.Series) -> pd.Series:
 class Run:
     state: str
     start: datetime          # UTC tz-aware, inclusive
-    end: Optional[datetime]  # UTC tz-aware, exclusive; None => open (LOAD only)
+    end: Optional[datetime]  # UTC tz-aware, exclusive; None => open (LOAD/IDLE only)
 
 
 def collapse_runs(
@@ -29,7 +29,8 @@ def collapse_runs(
 
     A run spans [first sample, next run's first sample). A gap larger than
     gap_seconds closes the current run at the last sample before the gap and
-    starts a fresh run. The trailing run stays open (end=None) only when LOAD.
+    starts a fresh run. The trailing run stays open (end=None) when LOAD or
+    IDLE; it always closes when OFF.
     """
     n = len(times)
     if n == 0:
@@ -198,6 +199,23 @@ def _count_samples(times, start, end) -> int:
 
 def build_intervals(device_id, times, statuses, tz_name, schedules, special,
                     allowed_minutes, gap_seconds, source, rule):
+    """Turn per-sample labels into LOAD/IDLE/OFF interval rows.
+
+    IDLE se comporta como LOAD: se guarda completo y puede quedar abierto.
+    Sólo cambia que NO cuenta como tiempo trabajado, cosa que resuelve el
+    consumidor al leer load_* vs idle_*, no esta función.
+
+    An open (still running) LOAD/IDLE run has no end yet, so its schedule
+    overlap is scored against the last sample instead. Without this,
+    on_schedule_seconds stays 0 for as long as the machine keeps running:
+    refresh_daily_facts extrapolates the interval's DURATION but reads
+    on_schedule_seconds as stored, so load_minutes_on_schedule — what the
+    dashboard card and the reports show for an 'algoritmo' device — would
+    sit at 0 and then jump when the run finally closes. The umbral worker
+    gives its open intervals the same `end or now()` treatment. The cap is
+    the last sample rather than wall clock: a device that stopped reporting
+    must stop accruing worked time.
+    """
     times = list(times)
     runs = collapse_runs(times, list(statuses), gap_seconds)
     runs = split_runs_at_midnight(runs, tz_name)
@@ -205,22 +223,6 @@ def build_intervals(device_id, times, statuses, tz_name, schedules, special,
     rows: List[IntervalRow] = []
     for r in runs:
         if r.state in ("LOAD", "IDLE"):
-            # IDLE se comporta como LOAD: se guarda completo y puede quedar
-            # abierto. Sólo cambia que NO cuenta como tiempo trabajado, cosa que
-            # resuelve el consumidor al leer load_* vs idle_*.
-            #
-            # An open (still running) LOAD/IDLE run has no end yet, so score its
-            # schedule overlap against the last sample. Without this,
-            # on_schedule_seconds stays 0 for as long as the machine keeps
-            # running: refresh_daily_facts extrapolates the interval's DURATION
-            # but reads on_schedule_seconds as stored, so
-            # load_minutes_on_schedule — what the dashboard card and the reports
-            # show for an 'algoritmo' device — would sit at 0 and then jump when
-            # the run finally closes. The umbral worker gives its open intervals
-            # the same `end or now()` treatment.
-            #
-            # The cap is the last sample rather than wall clock: a device that
-            # stopped reporting must stop accruing worked time.
             probe_end = r.end if r.end is not None else last_sample
             on_s, ratio, ok = (0, 0.0, False)
             if probe_end is not None and probe_end > r.start:
