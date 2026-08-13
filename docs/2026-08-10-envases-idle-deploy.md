@@ -175,7 +175,7 @@ the basis for hazard #2 above. If any row has a null `total_schedule_minutes`,
 the design assumption behind this runbook does not hold on this database —
 **stop and re-check the design doc before deploying anything else.**
 
-### 2. Apply the migration
+### 2. Apply both migrations
 
 Apply `sql/migrations/2026-08-10_device_daily_facts_idle_columns.sql`
 (status-engine repo) against the target database. It adds four columns to
@@ -183,6 +183,15 @@ Apply `sql/migrations/2026-08-10_device_daily_facts_idle_columns.sql`
 `idle_minutes_off_schedule`, `idle_interval_count`), all additive with
 `DEFAULT 0`. **This must happen before step 4 (the engine deploy).** See
 hazard #1.
+
+Also apply `sql/migrations/2026-08-13_add_devices_card_shows_idle.sql`
+(specs/timescale-playground repo) in this same step. It adds
+`devices.card_shows_idle` (`DEFAULT false`). **This must happen before step 3**:
+step 3 writes `card_shows_idle = true` on the new `03-piloto` row, which cannot
+succeed — or, worse, can be silently dropped into a workaround that leaves the
+flag at its default `false` — if the column does not exist yet. It is also
+required before the backend deploy (step 6), for the separate reason given
+there.
 
 ### 3. Create the `03-piloto` device row and its schedule
 
@@ -247,10 +256,10 @@ Expect a recent row for `03-piloto` with `result = 'ok'`.
 
 ### 6. Deploy backend, then the app web build — in that order
 
-Confirm `sql/migrations/2026-08-13_add_devices_card_shows_idle.sql` is applied
-before this step — see the Ordering summary below. The enriched dashboard
-query in `dashboard_repository` selects `d.card_shows_idle` unconditionally,
-so an old database errors on this deploy, not just renders a blank card.
+`sql/migrations/2026-08-13_add_devices_card_shows_idle.sql` must already be
+applied by this point (step 2). The enriched dashboard query in
+`dashboard_repository` selects `d.card_shows_idle` unconditionally, so an old
+database errors on this deploy, not just renders a blank card.
 
 Backend before app, not the reverse. The app reads `idle_minutes` and
 `off_minutes` from the backend payload; against an **old** backend those keys
@@ -306,10 +315,13 @@ migrations  →  status-engine  →  backend  →  app (web)
    (2)            (4)             (6)         (6)
 ```
 
-Both migrations must be applied before the backend deploy:
-`2026-08-10_*` (idle columns, engine-facing) and
-`2026-08-13_add_devices_card_shows_idle.sql` (card flag, backend-facing —
-`dashboard_repository` selects the column unconditionally and errors without it).
+Both migrations land together in step 2, before step 3 creates the
+`03-piloto` row: `2026-08-10_*` (idle columns, engine-facing) and
+`2026-08-13_add_devices_card_shows_idle.sql` (card flag). Step 3 writes
+`card_shows_idle = true` directly, so the column must already exist by then.
+The card-flag migration is also a hard backend dependency independent of that:
+`dashboard_repository`'s enriched dashboard query selects `d.card_shows_idle`
+unconditionally and errors without it — see step 6.
 
 Device row + schedule (step 3) must exist before step 4 produces anything
 useful, but the engine will not error without it — it will just fail to
