@@ -17,11 +17,13 @@ already carry `card_source='algoritmo'`:
  71 | tubera-piloto |         13 | t         | algoritmo
 ```
 
-The Flutter card gates on `device.cardSource == 'algoritmo'`
-(`machine_card_content.dart:50`), so **all five switch to the three-band bar
-the moment the app's web build ships** — not just `03-piloto`. Their cards
-lose the centred efficiency percentage and show amber (IDLE) permanently at
-0%, because none of their algorithms currently emit IDLE.
+As originally written, the Flutter card gated on `device.cardSource ==
+'algoritmo'` alone (`machine_card_content.dart:50`), so **all five would
+switch to the three-band bar the moment the app's web build ships** — not
+just `03-piloto`. Their cards would lose the centred efficiency percentage
+and show amber (IDLE) permanently at 0%, because none of their algorithms
+currently emit IDLE. (See the "Closed on 2026-08-13" note below — this no
+longer happens.)
 
 This is a deliberate, accepted consequence, not an oversight: all five are
 `is_hidden = true`, and `visible_devices_provider.dart` filters hidden
@@ -30,14 +32,28 @@ card. Only superusers, who already understand these are validation twins,
 will see it. This matches the app's existing convention for piloto devices
 and needs no code change to accept.
 
-Three repositories are involved, each with its own unpushed `feat/idle-state`
-branch:
+**Closed on 2026-08-13** by `docs/superpowers/specs/2026-08-13-card-shows-idle-design.md`:
+the bands are now gated on `devices.card_shows_idle`, which defaults to `false`.
+These five pilotos are never updated by the migration, so they keep the
+efficiency-fill card they had before the IDLE work. Only `03-piloto` is created
+with the flag on.
+
+Four repositories are involved. This deploy unit is the `feat/idle-state`
+branches below **plus** the `feat/card-shows-idle` branches of `backend` and
+`smart_look_app` — the card-flag work is not optional or deferrable here. The
+"Closed on 2026-08-13" note above, step 3's `card_shows_idle = true` write,
+and step 6's `dashboard_repository` dependency are only true if those two
+branches ship in this same deploy. Deploy the `feat/idle-state` builds alone
+and the flag column exists but the backend never selects it and the app still
+gates the three-band bar on `card_source` alone — the five hidden pilotos flip
+anyway, which is the exact outcome the "Closed" note says no longer happens.
 
 | repo | branch | what it carries |
 |---|---|---|
-| `status-engine` | `feat/idle-state` | classifier, IDLE intervals, idle facts, the migration, `03_piloto.py` |
-| `backend` | `feat/idle-state` | facts mirror, card payload, energy, reports |
-| `smart_look_app` | `feat/idle-state` | the three-band bar |
+| `status-engine` | `feat/idle-state` | classifier, IDLE intervals, idle facts, the `2026-08-10_*` migration, `03_piloto.py` |
+| `specs/timescale-playground` | `feat/card-shows-idle` | the `2026-08-13_add_devices_card_shows_idle.sql` migration |
+| `backend` | `feat/idle-state` + `feat/card-shows-idle` | facts mirror, card payload, energy, reports; CRUD schemas and dashboard payload field for `card_shows_idle` |
+| `smart_look_app` | `feat/idle-state` + `feat/card-shows-idle` | the three-band bar; the card-flag gate and the "Fuente de tarjeta" selector |
 
 Read the three items below before you touch anything: two deploy-ordering
 hazards and one known gap this deploy ships with. Hazard #2 is genuinely
@@ -167,7 +183,7 @@ the basis for hazard #2 above. If any row has a null `total_schedule_minutes`,
 the design assumption behind this runbook does not hold on this database —
 **stop and re-check the design doc before deploying anything else.**
 
-### 2. Apply the migration
+### 2. Apply both migrations
 
 Apply `sql/migrations/2026-08-10_device_daily_facts_idle_columns.sql`
 (status-engine repo) against the target database. It adds four columns to
@@ -175,6 +191,15 @@ Apply `sql/migrations/2026-08-10_device_daily_facts_idle_columns.sql`
 `idle_minutes_off_schedule`, `idle_interval_count`), all additive with
 `DEFAULT 0`. **This must happen before step 4 (the engine deploy).** See
 hazard #1.
+
+Also apply `sql/migrations/2026-08-13_add_devices_card_shows_idle.sql`
+(specs/timescale-playground repo) in this same step. It adds
+`devices.card_shows_idle` (`DEFAULT false`). **This must happen before step 3**:
+step 3 writes `card_shows_idle = true` on the new `03-piloto` row, which cannot
+succeed — or, worse, can be silently dropped into a workaround that leaves the
+flag at its default `false` — if the column does not exist yet. It is also
+required before the backend deploy (step 6), for the separate reason given
+there.
 
 ### 3. Create the `03-piloto` device row and its schedule
 
@@ -184,6 +209,17 @@ Create the device:
 - `company_id = 14`
 - `measurement_source = 'power'`
 - `card_source = 'algoritmo'`
+- `card_shows_idle = true` — **required for the three-band card.** Since
+  `2026-08-13_add_devices_card_shows_idle.sql`, `card_source='algoritmo'` alone
+  only selects the engine as the card's data source; the LOAD/IDLE/OFF split is
+  opt-in per device and defaults to `false`. Without this the piloto renders the
+  plain efficiency bar over correct data. In the app this pair is the
+  "Algoritmo + Inactivo" option of *Fuente de tarjeta* (superuser only).
+  Flipping the flag takes effect server-side instantly, no recompute needed —
+  but a running app session holds its device list in memory, and the 10s poll
+  only refreshes `status`, not the device list itself. The card picks up the
+  change on pull-to-refresh, a full app refresh, or provider invalidation, not
+  on the next poll tick.
 - `timezone = 'America/Santiago'`
 - `is_hidden = true` — `devices.is_hidden` defaults to `false`, but every
   existing piloto (`F1-piloto`, `tbxo-piloto`, `tbxp-piloto`, `rev1-piloto`,
@@ -232,6 +268,16 @@ SELECT * FROM status_run_log ORDER BY id DESC LIMIT 5;
 Expect a recent row for `03-piloto` with `result = 'ok'`.
 
 ### 6. Deploy backend, then the app web build — in that order
+
+`sql/migrations/2026-08-13_add_devices_card_shows_idle.sql` must already be
+applied by this point (step 2). The enriched dashboard query in
+`dashboard_repository` selects `d.card_shows_idle` unconditionally, so an old
+database errors on this deploy, not just renders a blank card — and this is
+not limited to the dashboard: `devices_repository`'s `get_by_id`,
+`get_by_company`, and the `create`/`update` `RETURNING` clauses all name the
+same column, so the whole device-management screen (list, save, create) 500s
+too if you're debugging a partial deploy and only think to check the
+dashboard.
 
 Backend before app, not the reverse. The app reads `idle_minutes` and
 `off_minutes` from the backend payload; against an **old** backend those keys
@@ -283,9 +329,17 @@ can claim as passed.
 ## Ordering summary
 
 ```
-migration  →  status-engine  →  backend  →  app (web)
+migrations  →  status-engine  →  backend  →  app (web)
    (2)            (4)             (6)         (6)
 ```
+
+Both migrations land together in step 2, before step 3 creates the
+`03-piloto` row: `2026-08-10_*` (idle columns, engine-facing) and
+`2026-08-13_add_devices_card_shows_idle.sql` (card flag). Step 3 writes
+`card_shows_idle = true` directly, so the column must already exist by then.
+The card-flag migration is also a hard backend dependency independent of that:
+`dashboard_repository`'s enriched dashboard query selects `d.card_shows_idle`
+unconditionally and errors without it — see step 6.
 
 Device row + schedule (step 3) must exist before step 4 produces anything
 useful, but the engine will not error without it — it will just fail to
