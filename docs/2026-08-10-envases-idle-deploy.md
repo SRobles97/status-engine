@@ -1,5 +1,12 @@
 # Deploying `03-piloto` (Envases Exportables idle state)
 
+> **Superseded in part — read `2026-08-14-idle-threshold-recalibration.md` too.**
+> This deploy shipped with `idle_threshold_low = 18.3`, which cut through the
+> middle of the idle current band and emitted about half the machine's idle time
+> as `LOAD`. The threshold is now 19.0, the golden test here is documented as a
+> port-fidelity check rather than a calibration one, and history needs a
+> backfill. The deploy steps below are otherwise still accurate.
+
 This turns on the three-state (OFF / IDLE / LOAD) classifier for Envases
 Exportables device `03` ("Exportable", id 66, company 14), rendered on its
 piloto twin `03-piloto`, exactly as `F1-piloto` and the Tubexa/Revesol
