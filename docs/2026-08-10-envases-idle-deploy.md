@@ -104,13 +104,14 @@ read `status_run_log` before looking anywhere else.
 ### 2. The piloto device needs its own `schedules` rows, not just a device row
 
 The engine classifies `03-piloto` off of `03`'s *live measurements*
-(`source_device_key`), but the card reads `shift_start` and
+(`source_device_key`), but the card reads `shift_start`, `active_minutes` and
 `total_schedule_minutes` from `device_current_status` joined on the
 **piloto's own device id** — not device 66's. If you create the `03-piloto`
-device row and stop there, `total_schedule_minutes` is `0`. That number is
-the denominator for all three bands (OFF / IDLE / LOAD percentages), so the
-card renders **0% / 0% / 0%** while the classification underneath is
-completely correct. This looks exactly like a broken feature, and it will
+device row and stop there, both minute columns are `0`. `active_minutes` (the
+elapsed part of the shift) is the denominator for all three bands (OFF / IDLE
+/ LOAD percentages) and falls back to `total_schedule_minutes`, so with
+neither one the card renders **0% / 0% / 0%** while the classification
+underneath is completely correct. This looks exactly like a broken feature, and it will
 send you down the wrong path chasing the classifier instead of the missing
 schedule. Copy device 66's `schedules` rows onto `03-piloto` in the same step
 you create the device — do not treat it as a follow-up.
