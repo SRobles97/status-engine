@@ -37,6 +37,10 @@ class StatusAlgorithm(ABC):
     device_key: str
     power_column: str
     smoothing_minutes: float = 0.0
+    # Piso de duración para LOAD: una racha más corta se descarta y adopta el
+    # estado siguiente. Segunda pasada de los notebooks de Revesol, aplicada
+    # DESPUÉS de smoothing_minutes. 0.0 la desactiva (comportamiento histórico).
+    min_load_minutes: float = 0.0
     # Data-quality guard: a measurement can only be LOAD/IDLE if guard_column >= guard_min.
     # Used to reject implausible spikes (e.g. high power while drawing ~0 current). The
     # guard is applied by the runner before smoothing, so glitches can't anchor smoothing.

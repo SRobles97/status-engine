@@ -88,11 +88,19 @@ appears, which is when the right value stops being guessable.
 ## Deploy
 
 ```bash
-docker-compose up --build
+docker-compose down
+docker-compose up -d --build
 ```
 
 `--build` is required — the engine bakes its code into the image, so a plain
 `up` keeps the old constant. Compose v1, hyphenated.
+
+**Do the `down` first.** Going straight to `up -d --build` hits the compose
+v1.29.2 `KeyError: 'ContainerConfig'` bug on recreate (the image builds fine;
+only the container swap fails). `down` then `up` sidesteps it entirely and is
+cleaner than the `docker rm -f <container>` workaround used elsewhere in these
+runbooks. This service declares no volumes, so removing the container costs
+nothing.
 
 Verify:
 
@@ -121,17 +129,43 @@ SELECT min((start_time AT TIME ZONE 'America/Santiago')::date) AS first_day
 FROM device_state_intervals WHERE device_id = 74 AND source = 'algo';
 ```
 
-Then set `STATUS_WINDOW_DAYS` in `.env` to at least that many days back,
-restart, wait for one tick (`RUN_INTERVAL_SECONDS`, default 300), confirm, and
-**put it back to `0`**:
+Set `STATUS_WINDOW_DAYS` to **exactly** `days_back` — `window_bounds` computes
+`today's local midnight − window_days`, so `days_back` lands the window start on
+the first day that has data. Going one higher reaches back to a day with no
+facts and *creates* rows there, which looks like the backfill overshot.
+
+Restart, wait for one tick, confirm, and **put it back to `0`**:
 
 ```bash
-# .env: STATUS_WINDOW_DAYS=<days>
-docker-compose up --build -d
-docker-compose logs -f          # wait for "iteration done: N/N ok"
+# .env: STATUS_WINDOW_DAYS=<days_back>
+docker-compose down && docker-compose up -d
+docker-compose logs -f          # wait for "iteration done: N/N ok", then Ctrl-C
 # .env: STATUS_WINDOW_DAYS=0
-docker-compose up -d
+docker-compose down && docker-compose up -d
+docker exec status_engine env | grep STATUS_WINDOW_DAYS   # confirm it took
 ```
+
+No `--build` on either — the image is already current and only the env changes.
+
+### Outcome of the 2026-08-14 run (recorded as a reference)
+
+`STATUS_WINDOW_DAYS=4` covered 2026-08-10…08-14 (953 interval rows, ~85k
+samples); one tick, well under a minute, `7/7 ok`. Verified `device_daily_facts`
+for `03-piloto` on 2026-08-13 against the prediction from the offline replay:
+
+| field | before | predicted | actual |
+|---|---|---|---|
+| `total_minutes` | 553.32 | 553.32 | 553.3 |
+| `load_minutes` | 255.58 | ~100.8 | 100.75 |
+| `idle_minutes` | 118.08 | ~272.9 | 272.9 |
+| `off_minutes` | 179.65 | 179.65 | 179.65 |
+| counts L/I/O | 173/175/12 | 177/181/12 | 177/181/12 |
+
+Idle as a share of active time came out consistent across every backfilled day
+— 71.8% / 71.4% / 73.0% / 68.5% (partial) — against 72.0% in the client's
+Excel. `2026-08-12` has no row because device 66 reported no measurements that
+day at all (it is likewise absent from `power_measurements`), not because the
+backfill missed it.
 
 Three things to know before doing this:
 

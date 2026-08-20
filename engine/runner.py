@@ -12,7 +12,7 @@ from engine.discovery import DiscoveredAlgorithm
 from engine import intervals as intervals_mod
 from engine import reporting as reporting_mod
 from engine.schedule import on_schedule_mask
-from engine.smoothing import smooth_statuses
+from engine.smoothing import drop_short_loads, smooth_statuses
 
 
 @dataclass
@@ -28,6 +28,9 @@ class RunResult:
 def _classify(algo, df):
     statuses = algo.classify(df)
     statuses = smooth_statuses(statuses, df["time"], algo.smoothing_minutes)
+    # Orden fijo: rellenar huecos cortos primero, medir las rachas de LOAD
+    # después. Invertirlo mediría rachas que el relleno todavía no unió.
+    statuses = drop_short_loads(statuses, df["time"], algo.min_load_minutes)
     if algo.guard_column:
         statuses = statuses.mask(
             df[algo.guard_column].astype(float) < algo.guard_min, "OFF")
