@@ -213,6 +213,145 @@ def get_or_create_unassigned_classification(conn, company_id: int) -> int:
         return int(cur.fetchone()[0])
 
 
+def fetch_algo_classifications_for_day(conn, device_id: int, local_day, tz_name: str,
+                                       source: str = "algo") -> dict:
+    """`start_time` -> `classification_id` de los OFF ya clasificados de ese día.
+
+    El motor reconstruye el día entero en cada corrida (delete + insert), y el
+    insert no sabía de clasificaciones: todo lo que un usuario clasificara hoy
+    desaparecía en la siguiente iteración, ~5 min después. Esta foto se toma
+    ANTES del delete y se vuelve a aplicar sobre las filas nuevas.
+
+    La llave es `start_time` y no el `id`: el id es nuevo en cada reconstrucción.
+    Los OFF de un mismo dispositivo+source no se solapan (lo garantiza
+    `ex_device_interval_overlap`), así que `start_time` los identifica sin
+    ambigüedad. Un paro que cambia de inicio entre corridas es, a efectos del
+    reporte, otro paro; su clasificación no se arrastra a propósito.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT start_time, classification_id FROM device_state_intervals "
+            "WHERE device_id = %s AND source = %s AND state = 'OFF' "
+            "AND classification_id IS NOT NULL "
+            "AND (start_time AT TIME ZONE %s)::date = %s",
+            (device_id, source, tz_name, local_day),
+        )
+        return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+
+def get_or_create_allowed_classification(conn, company_id: int) -> int:
+    """'Paro permitido' de la empresa, con la MISMA firma que crea el worker
+    umbral (`job_intervals_incremental.get_or_create_classification`).
+
+    Nombre, color e `is_system` tienen que coincidir exactamente: tanto
+    'Uso de tiempos' como 'Tendencias' resuelven el paro autorizado por NOMBRE
+    en el cliente, no por el `allowed_off_minutes` que manda la API. Una fila
+    distinta para el mismo concepto pinta dos tajadas donde debería haber una.
+    """
+    name = "Paro permitido"
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM classifications WHERE company_id = %s AND name = %s",
+            (company_id, name),
+        )
+        row = cur.fetchone()
+        if row:
+            return int(row[0])
+        cur.execute(
+            "INSERT INTO classifications (company_id, name, description, status, "
+            "color, is_work, is_system) VALUES (%s, %s, '', 'active', '#4CAF50', "
+            "false, true) RETURNING id",
+            (company_id, name),
+        )
+        return int(cur.fetchone()[0])
+
+
+# --- Espejo de configuración piloto ← origen --------------------------------
+#
+# Un piloto se clasifica con las mediciones de OTRO equipo, pero los reportes
+# leen su configuración del piloto mismo: 'Uso de tiempos' calcula las horas
+# programadas desde `device_schedules` del piloto, y `is_allowed` sale de su
+# `device_threshold_config`. El motor, en cambio, recorta los OFF con el horario
+# del ORIGEN. Las dos copias se crearon a mano una vez y nunca se volvieron a
+# sincronizar: hoy ningún piloto tiene los `special_days` de su máquina, así que
+# cada feriado del origen sale como un día entero de "Programado sin datos".
+#
+# Sincronizarlas en cada corrida vuelve la deriva imposible. El motor pasa a ser
+# el dueño de esas filas para los pilotos — editar el horario de un piloto en la
+# app deja de tener efecto, que es justo lo que se quiere de un espejo oculto.
+
+_SCHEDULE_COLUMNS = ("day_schedules", "extra_hours", "special_days",
+                     "valid_from", "valid_to", "version", "shift_type")
+_MIRROR_SOURCE = "pilot_mirror"
+
+
+def _schedule_rows(conn, device_id: int) -> list:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {', '.join(_SCHEDULE_COLUMNS)} FROM device_schedules "
+            "WHERE device_id = %s ORDER BY shift_type, valid_from",
+            (device_id,),
+        )
+        return [tuple(r) for r in cur.fetchall()]
+
+
+def mirror_schedules(conn, source_device_id: int, pilot_device_id: int) -> bool:
+    """Deja el horario del piloto idéntico al del origen. True si reescribió.
+
+    Compara primero y sólo entonces reescribe: el motor corre cada 5 minutos y
+    un delete+insert incondicional churnearía la tabla y quemaría ids para nada.
+    Cuando hay que reescribir se borra TODO el horario del piloto y se reinserta
+    el del origen; `valid_range` es generada y `ex_device_schedules_overlap`
+    rechaza versiones solapadas, así que reemplazar el juego completo dentro de
+    la misma transacción es la única forma segura de converger.
+    """
+    src = _schedule_rows(conn, source_device_id)
+    if src == _schedule_rows(conn, pilot_device_id):
+        return False
+    cols = ", ".join(_SCHEDULE_COLUMNS)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM device_schedules WHERE device_id = %s",
+                    (pilot_device_id,))
+        if src:
+            # INSERT ... SELECT y no un round-trip por Python: `day_schedules` y
+            # `special_days` son jsonb, y psycopg2 no readapta el dict que acaba
+            # de leer ("can't adapt type 'dict'"). Copiar dentro del motor de BD
+            # también evita cualquier pérdida de fidelidad en la ida y vuelta.
+            cur.execute(
+                f"INSERT INTO device_schedules (device_id, {cols}, source) "
+                f"SELECT %s, {cols}, %s FROM device_schedules WHERE device_id = %s",
+                (pilot_device_id, _MIRROR_SOURCE, source_device_id),
+            )
+    return True
+
+
+def mirror_threshold(conn, source_device_id: int, pilot_device_id: int) -> bool:
+    """Deja los minutos de paro permitido del piloto iguales a los del origen.
+
+    Si el origen no tiene umbral configurado no se borra el del piloto: la regla
+    automática simplemente no aplica, y borrarlo convertiría en no-permitidos
+    paros que ya estaban clasificados como tales.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT duration_minutes FROM device_threshold_config "
+                    "WHERE device_id = %s", (source_device_id,))
+        src = cur.fetchone()
+        if src is None or src[0] is None:
+            return False
+        cur.execute("SELECT duration_minutes FROM device_threshold_config "
+                    "WHERE device_id = %s", (pilot_device_id,))
+        dst = cur.fetchone()
+        if dst is not None and dst[0] == src[0]:
+            return False
+        cur.execute(
+            "INSERT INTO device_threshold_config (device_id, duration_minutes) "
+            "VALUES (%s, %s) ON CONFLICT (device_id) DO UPDATE "
+            "SET duration_minutes = EXCLUDED.duration_minutes, updated_at = now()",
+            (pilot_device_id, int(src[0])),
+        )
+    return True
+
+
 def delete_algo_intervals_for_day(conn, device_id: int, local_day, tz_name: str,
                                   source: str = "algo") -> None:
     with conn.cursor() as cur:
@@ -230,14 +369,15 @@ def insert_intervals(conn, rows) -> int:
     values = [
         (r.device_id, r.source, r.state, r.start_time, r.end_time,
          r.measurement_count, r.is_allowed, r.on_schedule_seconds,
-         r.on_schedule_ratio, r.on_schedule, r.on_schedule_rule)
+         r.on_schedule_ratio, r.on_schedule, r.on_schedule_rule,
+         r.classification_id)
         for r in rows
     ]
     sql = (
         "INSERT INTO device_state_intervals "
         "(device_id, source, state, start_time, end_time, measurement_count, "
         "is_allowed, on_schedule_seconds, on_schedule_ratio, on_schedule, "
-        "on_schedule_rule) VALUES %s"
+        "on_schedule_rule, classification_id) VALUES %s"
     )
     with conn.cursor() as cur:
         execute_values(cur, sql, values)

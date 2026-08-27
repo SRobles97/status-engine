@@ -189,6 +189,9 @@ class IntervalRow:
     on_schedule_ratio: float
     on_schedule: bool
     on_schedule_rule: str
+    # Lo resuelve el runner tras reconstruir el día (ver runner.apply_classifications):
+    # build_intervals sólo deriva geometría, no sabe de clasificaciones.
+    classification_id: Optional[int] = None
 
 
 def _count_samples(times, start, end) -> int:

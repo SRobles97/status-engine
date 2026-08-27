@@ -37,6 +37,42 @@ def _classify(algo, df):
     return statuses
 
 
+def apply_classifications(rows, preserved: dict, allowed_id):
+    """Resuelve el `classification_id` de las filas OFF recién reconstruidas.
+
+    Tres reglas, en este orden:
+
+    1. **Lo que un usuario clasificó, se conserva.** `preserved` es la foto
+       tomada antes del delete (ver `repository.fetch_algo_classifications_for_day`).
+       Incluye tanto una clasificación manual como un 'Sin asignar' explícito:
+       cualquier valor no nulo que NO sea el auto-tag es una decisión de alguien,
+       y el motor no la pisa.
+    2. **'Paro permitido' es del motor, no del usuario.** Si la fila reconstruida
+       ya no cae bajo el umbral, la etiqueta se cae con la regla que la puso — es
+       la pasada REVERT de `reapply_allowed_threshold_for_device`, que acá hay que
+       replicar porque el motor reconstruye el día por su cuenta y el `reapply`
+       del backend sólo corre cuando alguien edita el umbral. Dejarla puesta
+       daría un intervalo pintado como paro autorizado en el reporte mientras
+       `allowed_off_minutes` — que sale de `is_allowed` — dice que no lo es.
+    3. **Lo que nadie tocó y cae bajo el umbral, se etiqueta 'Paro permitido'.**
+       Es lo que hace el worker umbral al cerrar el intervalo
+       (`backfill_is_allowed_for_interval`). Sin esto los paros cortos del piloto
+       llegan al reporte como 'Sin asignar' — y encima invisibles, porque la
+       pantalla de clasificación filtra por `is_allowed`.
+
+    El resto queda en NULL, que es como el worker umbral deja los no permitidos;
+    los facts lo resuelven a 'Sin asignar' al agregar.
+    """
+    for r in rows:
+        if r.state != "OFF":
+            continue
+        was = preserved.get(r.start_time)
+        if was is not None and was != allowed_id:
+            r.classification_id = was
+        elif r.is_allowed and allowed_id is not None:
+            r.classification_id = allowed_id
+
+
 def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
                          schedules, special, gap_seconds, source, rule,
                          emits_idle=False):
@@ -69,8 +105,15 @@ def _emit_algo_intervals(repo, conn, write_id, df, statuses_full, tz_name,
     company_id = repo.device_company_id(conn, write_id)
     unassigned_id = (repo.get_or_create_unassigned_classification(conn, company_id)
                      if company_id is not None else None)
+    allowed_id = (repo.get_or_create_allowed_classification(conn, company_id)
+                  if company_id is not None else None)
     for day, day_rows in by_day.items():
+        # La foto va ANTES del delete: después el día está vacío y se perdería
+        # todo lo que alguien clasificó desde la corrida anterior.
+        preserved = repo.fetch_algo_classifications_for_day(
+            conn, write_id, day, tz_name, source)
         repo.delete_algo_intervals_for_day(conn, write_id, day, tz_name, source)
+        apply_classifications(day_rows, preserved, allowed_id)
         repo.insert_intervals(conn, day_rows)
         reporting_mod.refresh_daily_facts(conn, write_id, day, tz_name, source, special)
         if unassigned_id is not None:
@@ -99,6 +142,15 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
         return RunResult(write_id, algo.name, 0, 0, "skipped",
                          f"unresolved source device {algo.source_device_key}")
     read_id = discovered.source_device_id if algo.source_device_key else write_id
+
+    # Un piloto es un espejo: el motor lo clasifica con el horario del ORIGEN,
+    # pero los reportes leen las horas programadas y el umbral de paro permitido
+    # del PILOTO. Se sincronizan acá, en cada corrida, para que las dos mitades
+    # no puedan divergir (los feriados del origen ya se habían perdido en todos
+    # los pilotos). No-op barato cuando ya coinciden.
+    if read_id != write_id:
+        repo.mirror_schedules(conn, read_id, write_id)
+        repo.mirror_threshold(conn, read_id, write_id)
 
     tz_name = repo.device_timezone(conn, read_id) or default_tz
     start, end = window_bounds(now, tz_name, window_days)
