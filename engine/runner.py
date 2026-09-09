@@ -154,8 +154,15 @@ def run_once(repo, conn, discovered: DiscoveredAlgorithm, now: datetime,
 
     tz_name = repo.device_timezone(conn, read_id) or default_tz
     start, end = window_bounds(now, tz_name, window_days)
-    extra = ([algo.guard_column]
-             if algo.guard_column and algo.guard_column != algo.power_column else None)
+    # Las columnas extra son las que `classify` necesita (p. ej. las ocho del
+    # KMeans rodante) más la del guard. Sin las primeras el frame llegaría con
+    # `power_column` sola y el clasificador decidiría sobre una dimensión, sin
+    # error y sin log — el modo de falla más caro que tiene este motor.
+    wanted = list(algo.extra_input_columns)
+    if algo.guard_column:
+        wanted.append(algo.guard_column)
+    extra = [c for i, c in enumerate(wanted)
+             if c != algo.power_column and c not in wanted[:i]] or None
     df = repo.fetch_window(conn, read_id, algo.power_column, start, end, extra_columns=extra)
     if df.empty:
         return RunResult(write_id, algo.name, 0, 0, "skipped", "empty window")

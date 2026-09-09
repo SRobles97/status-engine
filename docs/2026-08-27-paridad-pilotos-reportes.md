@@ -100,18 +100,26 @@ Sólo afecta a `03-piloto`, el único spec con `emits_idle`.
   flota una leyenda vacía por un único dispositivo. Los períodos sin IDLE dentro
   de un rango que sí lo tiene se resuelven solos — `_SegmentMode.segment` ya
   devuelve un cero cuando no encuentra la clave.
-- **Vista simplificada (3 colores)**: el IDLE cae en 'Apagado' en los dos
-  reportes. Son tres baldes por contrato y es el único de los tres que no afirma
-  trabajo; la etiqueta nombra el balde, no el estado eléctrico (ahí ya conviven
-  el paro sin clasificar y el hueco sin datos).
+- **Vista simplificada (3 colores)**: el IDLE es el único balde que la
+  simplificación NO absorbe, en los dos reportes. Un dispositivo que distingue
+  IDLE de LOAD lo hace porque esa diferencia es el dato; plegarla en 'Apagado'
+  borra justamente lo que el piloto existe para mostrar — la tarjeta del
+  dashboard ya lo trata aparte por lo mismo. Los dispositivos sin IDLE siguen
+  viendo exactamente tres baldes: aportan 0 y la banda no se dibuja.
+  La banda se omite del todo (leyenda incluida) cuando NINGÚN dispositivo del
+  gráfico tiene tiempo IDLE — `buildBarSegments(includeIdle:)` en 'Uso de
+  tiempos', `_SegmentMode.keysFor` en 'Tendencias' —, para no dejarle a toda una
+  flota una entrada vacía por un único dispositivo.
 
-**El color es morado (`#7E57C2`), no el dorado de la tarjeta**
-(`AppColors.bandIdle`, `#EFC44A`). En la tarjeta las bandas son tres y el dorado
-no tiene vecino; en el reporte convive con 'Sin funcionar autorizado' (ámbar) en
-la misma pila, y medidos quedan a ΔE 3.1 **con visión normal** — indistinguibles.
-De los candidatos probados (dorado, dos morados, naranja, teal), el morado 400 es
-el único que no introduce ningún fallo nuevo de separación ni en claro ni en
-oscuro.
+**El color es el MISMO ámbar que 'Sin funcionar autorizado'**
+(`TimeStatisticsPalette.idle = authorized`). Para quien lee el reporte son la
+misma categoría: la máquina no está produciendo y no es un paro que reclamar.
+Idéntico no es lo mismo que parecido — dos ámbares distintos a ΔE 3 serían
+ilegibles (un error), dos bandas del mismo ámbar se leen como una sola categoría
+(una decisión). Hoy casi nunca coinciden: sólo `03-piloto` emite IDLE y sus
+paros cortos ya no salen como 'Paro permitido'. Cuando coincidan van pegadas en
+la pila y se leen como un bloque, con la leyenda y el tooltip separando las
+cifras.
 
 ## Orden de despliegue
 
@@ -138,6 +146,15 @@ cambio.
   - horarios espejados — `F1-piloto` pasó de 1 versión sin feriados a 2 con
     feriados; `tbxo-piloto` de 1 a 3. Las filas del origen quedaron intactas
     (`source='mobile_app'`).
+
+    **No verificar por `device_schedules.source = 'pilot_mirror'`.** La
+    comparación de `mirror_schedules` mira sólo el CONTENIDO (las siete columnas
+    de `_SCHEDULE_COLUMNS`), no la columna `source`, así que un piloto que ya
+    estaba sincronizado no se reescribe y conserva su marca vieja para siempre.
+    En el despliegue de prod eso hizo parecer que tres pilotos no habían
+    espejado cuando estaban perfectos. Lo correcto es comparar contenido piloto
+    vs origen — la consulta B2 de `sql/checks/pre-deploy-2026-08-27.sql`, que
+    debe dar `en_sync = t` en los ocho.
   - 'Paro permitido' asignado donde antes había NULL.
   - se clasificó a mano un intervalo, se volvió a correr el motor y la
     clasificación **sobrevivió** a la reconstrucción (fila nueva, mismo

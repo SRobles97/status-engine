@@ -13,6 +13,8 @@ from engine.idle_rules import (
     IdleParams,
     absorb_short_gaps,
     classify_segment,
+    classify_segment_rolling_kmeans,
+    resolve_by_threshold,
     resolve_unlabelled,
     rolling_min,
     rolling_sigma,
@@ -57,6 +59,15 @@ class StatusAlgorithm(ABC):
             raise ValueError(f"invalid power_column: {self.power_column!r}")
         if self.guard_column is not None and self.guard_column not in ALLOWED_POWER_COLUMNS:
             raise ValueError(f"invalid guard_column: {self.guard_column!r}")
+
+    @property
+    def extra_input_columns(self) -> tuple:
+        """Columnas que `classify` necesita además de `power_column`.
+
+        El runner las suma a las que le pide a la BD. Vacío por defecto: un
+        clasificador de una sola columna no necesita nada más.
+        """
+        return ()
 
     @property
     @abstractmethod
@@ -169,4 +180,88 @@ class IdleThresholdAlgorithm(StatusAlgorithm):
                 lbl if lbl != UNSET else resolve_unlabelled(chunk[i], params)
                 for i, lbl in enumerate(segment)
             )
+        return pd.Series(labels, index=df.index)
+
+
+# Las ocho columnas que el notebook le pasa a KMeans, EN SU ORDEN — el orden es
+# parte del contrato: `power_column` se localiza por índice para ordenar los
+# clústeres, igual que el `centroide[6]` del notebook.
+KMEANS_FEATURE_COLUMNS = (
+    "phase_a_current", "phase_b_current", "phase_c_current",
+    "phase_a_active_power", "phase_b_active_power", "phase_c_active_power",
+    "total_current", "total_active_power",
+)
+
+
+@dataclass(frozen=True)
+class RollingKMeansIdleAlgorithm(StatusAlgorithm):
+    """Tres estados (OFF/IDLE/LOAD) con un KMeans k=2 REAJUSTADO EN CADA MUESTRA
+    sobre las `window_samples` anteriores y `feature_columns` columnas.
+
+    Reemplaza a `IdleThresholdAlgorithm` en `03-piloto`. La diferencia que
+    importa es que no lleva ninguna constante calibrada para la banda IDLE: se
+    re-centra en cada ventana, así que sigue la meseta ociosa en vez de adivinar
+    dónde va a quedar. Ver docs/2026-09-09-envases-rolling-kmeans.md.
+
+    `off_threshold` y `fallback_threshold` sí son constantes, pero ninguna de las
+    dos separa IDLE de LOAD en régimen: la primera corta contra el apagado (la
+    banda 2-5 A de esta máquina tiene 0-3 muestras por día) y la segunda sólo
+    decide tramos que terminan antes de juntar una ventana entera.
+    """
+    off_threshold: float = 2.0
+    fallback_threshold: float = 19.0
+    window_samples: int = 120
+    short_gap_samples: int = 5
+    gap_seconds: float = 300.0
+    feature_columns: tuple = KMEANS_FEATURE_COLUMNS
+    random_state: int = 42
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.feature_columns:
+            raise ValueError("feature_columns cannot be empty")
+        for col in self.feature_columns:
+            if col not in ALLOWED_POWER_COLUMNS:
+                raise ValueError(f"invalid feature column: {col!r}")
+        if self.power_column not in self.feature_columns:
+            raise ValueError(
+                f"power_column {self.power_column!r} must be one of feature_columns "
+                "— cluster identity is decided by its centroid")
+        if self.window_samples < 2:
+            raise ValueError("window_samples must be at least 2")
+
+    @property
+    def name(self) -> str:
+        return "rolling_kmeans_idle"
+
+    @property
+    def extra_input_columns(self) -> tuple:
+        """Columnas que el runner tiene que pedirle a la BD además de
+        `power_column`. Sin esto el frame llega con dos columnas y KMeans
+        clasificaría sobre una sola dimensión, en silencio."""
+        return tuple(c for c in self.feature_columns if c != self.power_column)
+
+    def classify(self, df: pd.DataFrame) -> pd.Series:
+        missing = [c for c in self.feature_columns if c not in df.columns]
+        if missing:
+            raise ValueError(f"missing feature columns in window: {missing}")
+        features = df[list(self.feature_columns)].astype(float).to_numpy()
+        power_index = self.feature_columns.index(self.power_column)
+        times = list(df["time"])
+        labels: list[str] = []
+        for lo, hi in segment_bounds(times, self.gap_seconds):
+            chunk = features[lo:hi]
+            segment = classify_segment_rolling_kmeans(
+                chunk, power_index,
+                off_threshold=self.off_threshold,
+                fallback_threshold=self.fallback_threshold,
+                window=self.window_samples,
+                random_state=self.random_state)
+            segment = absorb_short_gaps(segment, self.short_gap_samples)
+            # El centinela se resuelve AL FINAL, igual que en
+            # IdleThresholdAlgorithm: absorb_short_gaps necesita verlo intacto.
+            labels.extend(
+                lbl if lbl != UNSET else resolve_by_threshold(
+                    chunk[i][power_index], self.off_threshold, self.fallback_threshold)
+                for i, lbl in enumerate(segment))
         return pd.Series(labels, index=df.index)

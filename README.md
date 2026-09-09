@@ -20,4 +20,10 @@ Create `algorithms/<Company>/<Device>.py` exposing an `ALGORITHM` whose
 `device_key` matches `devices.device_key` (resolution is by `device_key`, which is
 globally unique; the `<Company>` folder and the `company` field are organizational only).
 Unresolved or failing devices are logged in `status_run_log` and skipped.
+
+An algorithm that needs more than `power_column` (e.g. `RollingKMeansIdleAlgorithm`,
+which clusters over 8 columns) declares them in `extra_input_columns`; the runner
+adds them to the query. Without that the frame arrives with one input column and
+the classifier decides on a single dimension — no error, no log.
+
 After creating or editing an algorithm file, the Docker image must be rebuilt because code is baked in at build time — e.g. `docker-compose up --build`.
