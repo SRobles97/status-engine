@@ -149,3 +149,26 @@ def test_blank_facts_insert_columns_and_values_stay_aligned():
     assert values[cols.index("idle_minutes_off_schedule")] == "0"
     assert values[cols.index("idle_interval_count")] == "0"
     assert values[cols.index("computed_at")] == "now()"
+
+
+def _class_insert_sql():
+    conn, cur = _conn_with_cursor()
+    reporting.refresh_classification_facts(
+        conn, 52, date(2026, 6, 22), "America/Santiago", unassigned_id=7, source="algo")
+    return cur.execute.call_args_list[1].args[0]
+
+
+def test_classification_facts_include_open_intervals():
+    sql = _class_insert_sql()
+    assert "end_time IS NOT NULL" not in sql
+    assert "duration_seconds IS NOT NULL" not in sql
+    assert "COALESCE(i.duration_seconds, EXTRACT(EPOCH FROM (now() - i.start_time)))" in sql
+    assert "COALESCE(i.on_schedule_seconds, 0)" in sql
+
+
+def test_classification_facts_closed_interval_behaviour_unchanged():
+    sql = _class_insert_sql()
+    assert "COALESCE(i.duration_seconds," in sql
+    assert "i.dur >= 0" in sql
+    assert "SUM(i.dur / 60.0)" in sql and "SUM((i.dur - i.on_sched) / 60.0)" in sql
+    assert "i.state = 'OFF'" in sql and "i.source = %(source)s" in sql

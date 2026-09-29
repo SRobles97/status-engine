@@ -140,23 +140,32 @@ def refresh_classification_facts(conn, device_id, day, tz, unassigned_id, source
       minutes, minutes_on_schedule, minutes_off_schedule,
       interval_count, computed_at
     )
+    -- Open intervals (end_time / duration_seconds NULL) count with their elapsed time,
+    -- exactly as the totals writer (device_daily_facts) does; otherwise the OFF total
+    -- includes an ongoing stop while this breakdown drops it. Known minor skew:
+    -- on_schedule_seconds is a snapshot from the last KPI run (~60s) while dur uses
+    -- now(), so minutes_off_schedule can be overstated by a few seconds for an
+    -- in-shift open interval (self-correcting; same property as the totals).
+    -- Non-negative guard is a WHERE on the computed duration (rows with a negative
+    -- duration are dropped, as before), not GREATEST, so they are not counted either.
+    WITH intervals AS (
+      SELECT
+        i.device_id, i.classification_id,
+        COALESCE(i.duration_seconds, EXTRACT(EPOCH FROM (now() - i.start_time)))::real AS dur,
+        COALESCE(i.on_schedule_seconds, 0)::real AS on_sched
+      FROM device_state_intervals i
+      WHERE i.device_id = %(device_id)s AND i.source = %(source)s AND i.state = 'OFF'
+        AND (i.start_time AT TIME ZONE %(tz)s)::date = %(day)s::date
+    )
     SELECT
       i.device_id, %(day)s::date, %(source)s,
-      COALESCE(i.classification_id, %(unassigned_id)s)::bigint,
-      'OFF'::text,
-      SUM(i.duration_seconds / 60.0)::real,
-      SUM(i.on_schedule_seconds / 60.0)::real,
-      SUM((i.duration_seconds - i.on_schedule_seconds) / 60.0)::real,
-      COUNT(*)::int,
-      now()
-    FROM device_state_intervals i
-    WHERE i.device_id = %(device_id)s
-      AND i.source = %(source)s
-      AND i.state = 'OFF'
-      AND i.end_time IS NOT NULL
-      AND i.duration_seconds IS NOT NULL
-      AND i.duration_seconds >= 0
-      AND (i.start_time AT TIME ZONE %(tz)s)::date = %(day)s::date
+      COALESCE(i.classification_id, %(unassigned_id)s)::bigint, 'OFF'::text,
+      SUM(i.dur / 60.0)::real,
+      SUM(i.on_sched / 60.0)::real,
+      SUM((i.dur - i.on_sched) / 60.0)::real,
+      COUNT(*)::int, now()
+    FROM intervals i
+    WHERE i.dur >= 0
     GROUP BY i.device_id, COALESCE(i.classification_id, %(unassigned_id)s);
     """
     with conn.cursor() as cur:
