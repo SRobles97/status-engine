@@ -177,22 +177,31 @@ GROUP BY state;
 
 Los tres estados presentes, IDLE la banda más grande o la segunda.
 
-### 3. Backfill hasta el 2026-08-14
+### 3. Backfill desde el jueves 2026-09-03
 
-Toda la historia de `03-piloto` desde el 2026-08-14 lleva el reparto de la
-escalera. El motor reescribe días enteros, así que ensanchar la ventana los
-arregla en el lugar.
+Alcance decidido el 2026-09-09: se reescriben **sólo los últimos 6 días**
+(2026-09-03 … hoy), no toda la historia desde la recalibración.
+
+**`STATUS_WINDOW_DAYS = 6`.** `window_bounds` calcula `medianoche local de hoy −
+window_days`, así que 6 deja el inicio de la ventana clavado en
+`2026-09-03 00:00` de Santiago, con el jueves entero adentro. Uno más alcanza el
+miércoles 09-02 y lo reescribe también; uno menos deja el jueves a medias. Si
+esto se corre otro día, recalculalo — el número depende de la fecha:
 
 ```sql
-SELECT (CURRENT_DATE - DATE '2026-08-14') AS days_back;
+SELECT (CURRENT_DATE - DATE '2026-09-03') AS days_back;   -- 6 el 2026-09-09
 ```
 
-Poné `STATUS_WINDOW_DAYS` **exactamente** en ese número: `window_bounds` calcula
-`medianoche local de hoy − window_days`, así que uno más alcanza un día sin
-datos y **crea** filas ahí, que parece que el backfill se pasó.
+**Consecuencia que hay que aceptar a propósito:** del 2026-08-14 al 2026-09-02
+`03-piloto` conserva el reparto de la escalera, así que su historial queda
+partido en dos regímenes con el corte en el 09-03. Por el orden de magnitud de
+la tabla de más arriba, esos días subestiman IDLE y sobrestiman LOAD en algo del
+orden de 30 minutos diarios. No rompe nada — el motor no mira hacia atrás —,
+pero cualquier comparación mes contra mes cruza esa costura. Ampliar la ventana
+más adelante los arregla en el lugar, sin nada que deshacer.
 
 ```bash
-# .env: STATUS_WINDOW_DAYS=<days_back>
+# .env: STATUS_WINDOW_DAYS=6
 docker-compose down && docker-compose up -d
 docker-compose logs -f          # esperá "iteration done: N/N ok", después Ctrl-C
 # .env: STATUS_WINDOW_DAYS=0
@@ -205,12 +214,13 @@ env.
 
 Cuatro cosas que conviene saber antes:
 
-- **Ese tick va a tardar.** 26 días son ~450.000 muestras y el KMeans se
-  reajusta en cada una. La medición local: 51.925 muestras en 34 s, o sea unos
-  **5 minutos acá y probablemente 10–20 en el VPS**. Va a exceder
-  `RUN_INTERVAL_SECONDS=300` y eso está bien: el lock advisory hace que los
-  ticks siguientes se salteen hasta que termine. Esperá el `iteration done`, no
-  el reloj.
+- **Cuánto tarda ese tick.** 6 días son unas 65.000 muestras dentro de horario y
+  el KMeans se reajusta en cada una. La medición local fue 51.925 muestras en
+  34 s (~1.500/s), así que esperá **~45 s acá y del orden de 1–3 minutos en el
+  VPS**. A diferencia de un backfill largo, éste entra cómodo dentro de
+  `RUN_INTERVAL_SECONDS=300` y no debería saltearse ningún tick. Igual esperá el
+  `iteration done`, no el reloj: si alguna vez se pasa de 300 s, el lock advisory
+  simplemente saltea los ticks siguientes hasta que termine.
 
 - **Ensanchar la ventana NO cambia las etiquetas de este algoritmo**, y eso es
   deliberado. `2026-08-14-idle-threshold-recalibration.md` advierte que un
