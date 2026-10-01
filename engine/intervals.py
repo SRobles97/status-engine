@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Sequence
@@ -195,9 +196,12 @@ class IntervalRow:
 
 
 def _count_samples(times, start, end) -> int:
-    if end is None:
-        return sum(1 for t in times if t >= start)
-    return sum(1 for t in times if start <= t < end)
+    # `times` viene ordenado (fetch_window: ORDER BY time), así que basta con
+    # bisect. Recorrerlo entero por cada intervalo era O(intervalos × muestras):
+    # invisible en la ventana de hoy, horas en un backfill de 70 días a 2 s.
+    lo = bisect_left(times, start)
+    hi = len(times) if end is None else bisect_left(times, end)
+    return max(0, hi - lo)
 
 
 def build_intervals(device_id, times, statuses, tz_name, schedules, special,
