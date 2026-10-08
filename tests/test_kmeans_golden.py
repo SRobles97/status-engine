@@ -80,7 +80,7 @@ def test_the_fixture_day_exercises_all_three_states(path):
 ALGORITHMS_DIR = Path(__file__).resolve().parents[1] / "algorithms"
 
 
-def test_the_deployed_03_piloto_is_this_algorithm_with_these_constants():
+def test_the_deployed_03_is_this_algorithm_with_these_constants():
     """Ata el archivo DESPLEGADO a las constantes contra las que se compara el
     fixture dorado.
 
@@ -92,8 +92,8 @@ def test_the_deployed_03_piloto_is_this_algorithm_with_these_constants():
     from engine.algorithms import KMEANS_FEATURE_COLUMNS
     from engine.discovery import load_algorithm_specs
 
-    specs = [a for a in load_algorithm_specs(ALGORITHMS_DIR) if a.device_key == "03-piloto"]
-    assert len(specs) == 1, f"esperaba un único 03-piloto, encontré {len(specs)}"
+    specs = [a for a in load_algorithm_specs(ALGORITHMS_DIR) if a.device_key == "03"]
+    assert len(specs) == 1, f"esperaba un único 03, encontré {len(specs)}"
     algo = specs[0]
 
     assert isinstance(algo, RollingKMeansIdleAlgorithm)
@@ -101,7 +101,7 @@ def test_the_deployed_03_piloto_is_this_algorithm_with_these_constants():
     assert algo.fallback_threshold == NOTEBOOK_FALLBACK_THRESHOLD
     assert algo.window_samples == NOTEBOOK_WINDOW
     assert algo.emits_idle is True
-    assert algo.source_device_key == "03", "el piloto se clasifica con las medidas del 03"
+    assert algo.source_device_key is None, "corre directo sobre el 03, sin piloto"
     assert algo.smoothing_minutes == 0, (
         "el suavizado del motor es LOAD-céntrico y se comería los tramos IDLE "
         "cortos, que son justamente el dato pedido")

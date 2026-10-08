@@ -1,9 +1,8 @@
-# status-engine/algorithms/Envases Exportables/03_piloto.py
 from engine.algorithms import RollingKMeansIdleAlgorithm
 
-# 03-piloto — clasificado a partir de las mediciones EN VIVO del dispositivo 03
-# ("Exportable", id 66), escrito sobre el device_id del piloto (74). Tres
-# estados: OFF / IDLE / LOAD.
+# 03 ("Exportable", id 66) — corre directo sobre el dispositivo original;
+# reemplaza al piloto 03-piloto (id 74) el 2026-10-08. Tres estados:
+# OFF / IDLE / LOAD.
 #
 # Port del KMeans k=2 rodante de `algoritmos/Envases Exportables/Disp EnvExp
 # Mold1.json` (Colab, 2026-09-09), que reemplazó a la escalera de umbrales que
@@ -19,8 +18,7 @@ from engine.algorithms import RollingKMeansIdleAlgorithm
 # problema de `idle_threshold_low` (18.3 el 2026-08-10, 19.0 el 2026-08-14).
 ALGORITHM = RollingKMeansIdleAlgorithm(
     company="Envases Exportables",
-    device_key="03-piloto",
-    source_device_key="03",
+    device_key="03",
     power_column="total_current",
     emits_idle=True,
     # El suavizado del motor es LOAD-céntrico: se comería los tramos IDLE

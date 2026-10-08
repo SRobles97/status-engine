@@ -49,9 +49,9 @@ ALGORITHMS_DIR = Path(__file__).resolve().parents[1] / "algorithms"
 @pytest.fixture(scope="module")
 def deployed():
     """El algoritmo DESPLEGADO, cargado con el loader de producción: el test
-    tiene que romperse si alguien mueve `off_threshold` en `03_piloto.py`."""
-    specs = [a for a in load_algorithm_specs(ALGORITHMS_DIR) if a.device_key == "03-piloto"]
-    assert len(specs) == 1, f"esperaba un único 03-piloto, encontré {len(specs)}"
+    tiene que romperse si alguien mueve `off_threshold` en `03.py`."""
+    specs = [a for a in load_algorithm_specs(ALGORITHMS_DIR) if a.device_key == "03"]
+    assert len(specs) == 1, f"esperaba un único 03, encontré {len(specs)}"
     return specs[0]
 
 
